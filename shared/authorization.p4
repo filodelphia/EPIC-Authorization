@@ -28,6 +28,9 @@ const bit<8> EPIC = 253;
     #define IPV6_EXTENSION_HEADER_SIZE 8
 #endif
 
+#define WITHIN_AS 0
+#define CROSSED_AS 1
+
 /*************************************************************************
 *********************** H E A D E R S  ***********************************
 *************************************************************************/
@@ -58,6 +61,11 @@ header ipv6_ext_base_t {
     bit<8> nextHeader;
     bit<8> hdrExtLen;
     varbit<16320> data; // Maximum size is 255 octets => 8 * 255 = 2040 bytes = 16'320bits
+}
+
+header ipv6_ext_fixed_t {
+    bit<8> nextHeader;
+    bit<8> hdrExtLen;
 }
 
 // Routing extension header
@@ -93,6 +101,9 @@ header epicl1_per_hop_t {
 
 // Metadata
 struct metadata {
+    bit<64> key;
+
+    bit<1> is_AS_ingress;
     bit<4> ext_idx;
     bit<8> segment_list_count;
     bit<24> calculated_mac;
@@ -118,6 +129,14 @@ struct headers {
     epicl1_t epic;
     epicl1_per_hop_t epic_per_hop;
 }
+
+// Extern definition
+extern hsip_t {
+    hsip_t();
+    void max(in bit<64> key, in bit<* > pkt, out bit<24> tag);
+}
+
+hsip_t hsip();
 
 /*************************************************************************/
 /**************************  P A R S E R  ********************************/
@@ -171,16 +190,15 @@ parser MyParser(packet_in packet,
     }
 
     state parse_ipv6_ext_chain_before_SR {
-        ipv6_ext_base_t temp;
-        packet.extract(temp, 16);
+        ipv6_ext_fixed_t peek;
+        packet.lookahead(peek); // does not advance cursor
 
-        // Extract variable size                                          Removing the 2 bytes already extracted
-        bit<32> len = ((bit<32>) (temp.hdrExtLen + 1) * 8) - 2;
-        packet.extract(temp, len * 8);
-
-        hdr.ipv6_ext_base_before_SR[meta.ext_idx] = temp;
+        bit<32> len_bytes = ((bit<32>)(peek.hdrExtLen + 1)) * 8; // RFC: units of 8 bytes
+        // We already account for the fixed first 2 bytes because the varbit header extracts total length
+        // Define ipv6_ext_base_t so its varbit 'data' absorbs len_bytes - 2
+        
+        packet.extract(hdr.ipv6_ext_base_before_SR[meta.ext_idx], len_bytes * 8);
         hdr.ipv6_ext_base_before_SR[meta.ext_idx].setValid();
-
         meta.ext_idx = meta.ext_idx + 1;
 
         transition select(temp.nextHeader) {
@@ -203,16 +221,15 @@ parser MyParser(packet_in packet,
     }
 
     state parse_ipv6_ext_chain_after_SR {
-        ipv6_ext_base_t temp;
-        packet.extract(temp, 16);
+        ipv6_ext_fixed_t peek;
+        packet.lookahead(peek); // does not advance cursor
 
-        // Extract variable size                                          Removing the 2 bytes already extracted
-        bit<32> len = ((bit<32>) (temp.hdrExtLen + 1) * 8) - 2;
-        packet.extract(temp, len * 8);
-
-        hdr.ipv6_ext_base_after_SR[meta.ext_idx] = temp;
+        bit<32> len_bytes = ((bit<32>)(peek.hdrExtLen + 1)) * 8; // RFC: units of 8 bytes
+        // We already account for the fixed first 2 bytes because the varbit header extracts total length
+        // Define ipv6_ext_base_t so its varbit 'data' absorbs len_bytes - 2
+        
+        packet.extract(hdr.ipv6_ext_base_after_SR[meta.ext_idx], len_bytes * 8);
         hdr.ipv6_ext_base_after_SR[meta.ext_idx].setValid();
-
         meta.ext_idx = meta.ext_idx + 1;
 
         transition select(temp.nextHeader) {
@@ -280,6 +297,22 @@ control MyIngress(inout headers hdr, inout metadata meta, inout standard_metadat
         hdr.route_header.segmentsLeft = hdr.route_header.segmentsLeft - 1;
     }
 
+    action mark_internal() {
+        meta.is_AS_ingress = WITHIN_AS;
+    }
+
+    action mark_external() {
+        meta.is_AS_ingress = CROSSED_AS;
+    }
+
+
+    // Key loading table
+    table key_load {
+        actions = { load_key; NoAction; }
+        size = 1;
+        default_action = NoAction();
+    }
+
     // IPv6 table
     table ipv6_forwarding {
         key = {
@@ -296,13 +329,28 @@ control MyIngress(inout headers hdr, inout metadata meta, inout standard_metadat
     }
 
     // Routing table
-    table routing_forwarding {
+    table sr_forwarding {
         key = {
             hdr.ipv6.dstAddr: exact;
         }
 
         actions = {
             nextDestination;
+            NoAction;
+        }
+
+        default_action = NoAction();
+    }
+
+    // Verify AS ingress
+    table AS_ports {
+        key = {
+            standard_metadata.ingress_port : exact;
+        }
+
+        actions = {
+            mark_internal;
+            mark_external;
             NoAction;
         }
 
@@ -330,13 +378,20 @@ control MyIngress(inout headers hdr, inout metadata meta, inout standard_metadat
             ipv6_forwarding.apply();
 
             if(hdr.route_header.isValid() && hdr.route_header.segmentsLeft > 0) {
-                routing_forwarding.apply();
+                sr_forwarding.apply();
             }
         }
 
-        if(hdr.epic.isValid()) {
-            // TODO: Implement this correctly via the extern function
-            // meta.calculated_mac = calculate_mac(parameters)
+        //      EPIC only on AS ingress
+        if(meta.is_AS_ingress == CROSSED_AS && hdr.epic.isValid()) {
+            // Load key
+            key_load.apply();
+
+
+            // Calculating MAC based on the defined algorithm during compilation
+            bit<24> tag;
+            aesm.mac(meta.key, hdr.epic_per_hop, tag);
+            meta.calculated_mac = tag; 
 
             epic_authorization.apply();
 

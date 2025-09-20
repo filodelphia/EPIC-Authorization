@@ -1,0 +1,3 @@
+[submodule "external/p4-projects"]
+	path = external/p4-projects
+	url = https://github.com/Princeton-Cabernet/p4-projects.git
