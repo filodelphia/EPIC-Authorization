@@ -9,13 +9,14 @@
 	#error "Please set NUM_WORDS_IG to be floor((NUM_WORDS+1)/2) and NUM_WORDS_EG to be floor((NUM_WORDS)/2)."
 #endif
 
-#define SIP_KEY_0 0x33323130
-#define SIP_KEY_1 0x42413938
-
+#define KEY_0 0x33323130
+#define KEY_1 0x42413938
+ 
 const bit<32> const_0 = 0;
 const bit<32> const_1 = 0;
 const bit<32> const_2 = 0x6c796765;
 const bit<32> const_3 = 0x74656462;
+
 
 #define ROUND_TYPE_COMPRESSION 0
 #define ROUND_TYPE_FINALIZATION 1
@@ -28,48 +29,30 @@ const bit<32> const_3 = 0x74656462;
 // https://www.iana.org/assignments/protocol-numbers/protocol-numbers.xhtml
 // Layer 2 definitions
 const bit<16> TYPE_IPV6 = 0x86DD;
+const bit<16> SIP_AUTHENTICATOR = 0xEA01;
+const bit<16> SIP_VALIDATION = 0xEA02;
+const bit<16> LOAD_KEY_1 = 0xEA03;
+const bit<16> LOAD_KEY_2 = 0xEA04;
+const bit<16> MAC_1 = 0xEA05;
+const bit<16> MAC_2 = 0xEA06;
 
-const bit<16> TYPE_SIP  = 0x88B5;
 
 // Layer 3 definitions
-const bit<8> HOPOPT = 0;
-const bit<8> IPV6_ROUTE = 43;
-const bit<8> IPV6_FRAG = 44;
-const bit<8> ESP = 50;
-const bit<8> AH = 51;
-const bit<8> IPV6_OPTS = 60;
-const bit<8> MOBILITY_HEADER = 135;
-const bit<8> HIP = 139;
-const bit<8> SHIM6 = 140;
-const bit<8> BIT_EMU = 147;
-const bit<8> EPIC = 253;
-
-#ifndef MAX_SRV6_SEGMENTS
-    #define MAX_SRV6_SEGMENTS 10
-#endif
-
-#ifndef IPV6_EXTENSION_HEADER_SIZE
-    #define IPV6_EXTENSION_HEADER_SIZE 8
-#endif
-
-const bit<32> PATH_DELTA = 32w7200; // 2 hours stored as seconds in 32bit integer
-
+const bit<8> EPIC = 252;
 
 /*************************************************************************
 *********************** H E A D E R S  ***********************************
 *************************************************************************/
 
-typedef bit<9>  egressSpec_t;
-
 // Layer 2 headers
-header ethernet_t {
+header ethernet_h {
     bit<48> dstAddr;
     bit<48> srcAddr;
     bit<16> etherType;
 }
 
 // IPv6 header
-header ipv6_t {
+header ipv6_h {
     bit<4> version;
     bit<8> traffClass;
     bit<20> flowLabel;
@@ -80,55 +63,21 @@ header ipv6_t {
     bit<128> dstAddr;
 }
 
-// IPv6 extension header structure
-header ipv6_ext_base_t {
-    bit<8> nextHeader;
-    bit<8> hdrExtLen;
-    varbit<16320> data; // Maximum size is 255 octets => 8 * 255 = 2040 bytes = 16'320bits
+header key_loader_h {
+	bit<32> key_0;
+	bit<32> key_1;
 }
 
-header ipv6_ext_fixed_t {
-    bit<8> nextHeader;
-    bit<8> hdrExtLen;
+header mac_h {
+	bit<32> calculated_mac;
+	bit<16> etherType;
 }
 
-// Routing extension header
-header route_base_t {
-    bit<8>  nextHeader;
-    bit<8>  headerLength;   // Length in 8-octet units, minus first 8 octets
-    bit<8>  routingType;
-    bit<8>  segmentsLeft;   // Index (0..N-1) of the next segment to process
-    bit<8>   last_entry;
-    bit<8>   flags;
-    bit<16>  tag;
-}
-
-header route_segment_list_entry_t {
-    bit<128> address;
-}
-
-// EPIC Headers
-header epic_t {
-    bit<64> src_as_host;
-    bit<64> packet_ts;
-    bit<32> path_ts;
-
-    bit<8> per_hop_count;       // Used to loop (with recursion) over the hop validations 
-    bit<8> nextHeader;          // Added nextHeader to the paper implementation
-    // destination validation is unused in l1
-}
-
-header epic_per_hop_t {
-    bit<24> hop_validation;
-    bit<16> segment_id;
-}
-
-// Halfsip-hash header
 header sip_inout_h {
 	#define vardef_m(i) bit<32> m_##i;
 	__LOOP(NUM_WORDS, vardef_m)
 
-	bit<16> headerType;
+	bit<16> etherType;
 }
 
 header sip_meta_h {
@@ -136,10 +85,34 @@ header sip_meta_h {
 	bit<32> v_1;
 	bit<32> v_2;
 	bit<32> v_3;
+
 	bit<8> curr_round;
 }
 
-header sip_tmp_h {
+// EPIC Headers
+header epic_h {
+    bit<64> src_as_host;
+    bit<64> packet_ts;
+    bit<32> path_ts;
+
+    bit<8> per_hop_count;
+    bit<8> nextHeader;
+}
+
+
+header epic_per_hop_h {
+	bit<8> tsexp;
+    bit<8> ingress_if;
+    bit<8> egress_if;
+
+	bit<16> segment_identifier;
+    bit<24> hop_validation;
+}
+
+/*************************************************************************
+*********************** S T R U C T S  ***********************************
+*************************************************************************/
+struct sip_tmp_t {
 	bit<32> a_0;
 	bit<32> a_1;
 	bit<32> a_2;
@@ -148,52 +121,50 @@ header sip_tmp_h {
 	bit<32> i_1;
 	bit<32> i_2;
 	bit<32> i_3;
+
 	bit<8> round_type;
+}
+
+// Headers
+struct headers_t {
+	// Layer 2 headers
+    ethernet_h ethernet;
+
+	// HalfSip state as headers -- Parsed and emitted only during recirculation
+    sip_inout_h sip;
+    sip_meta_h  sip_meta;
+
+	key_loader_h key_loader;
+	mac_h mac;
+
+    // IPv6 headers
+    ipv6_h ipv6;
+
+    // EPIC headers
+    epic_h epic;
+	epic_per_hop_h epic_per_hop;
 }
 
 // Metadata
 struct ig_metadata_t {
-    bit<4> ext_idx;
-    bit<8> segment_list_count;
+	// Halfsiphash temp
+	sip_tmp_t sip_tmp;
+
+	// Key rotation
+	bit<32> rotated_k1;
 
     // Half-sip hash metadata
-	bit<9> rnd_port_for_recirc;
 	bit<1> rnd_bit;
-	sip_tmp_h sip_tmp;
+	bit<9> rnd_port_for_recirc;
 }
 
-struct eg_metadata_t { sip_tmp_h sip_tmp; } // egress tmp state only
-
-// Headers
-struct headers_t {
-    // Layer 2 headers
-    ethernet_t ethernet;
-
-    // IPv6 headers
-    ipv6_t ipv6;
-
-    // IPv6 extensions
-    ipv6_ext_base_t[IPV6_EXTENSION_HEADER_SIZE] ipv6_ext_base_before_SR;
-    ipv6_ext_base_t[IPV6_EXTENSION_HEADER_SIZE] ipv6_ext_base_after_SR;
-
-    // Route headers
-    route_base_t route_header;
-    route_segment_list_entry_t[MAX_SRV6_SEGMENTS] segment_list;
-
-    // EPIC headers
-    epic_t epic;
-    epic_per_hop_t epic_per_hop;
-
-    // HalfSip state as headers -- Parsed and emitted only during recirculation
-    sip_inout_h sip;
-    sip_meta_h  sip_meta;
+struct eg_metadata_t {
+	sip_tmp_t sip_tmp;
 }
-
 
 /*************************************************************************/
 /**************************  P A R S E R  ********************************/
 /*************************************************************************/
-
 // Tofino Ingress parser
 parser TofinoIngressParser(
     packet_in packet,
@@ -223,13 +194,14 @@ parser TofinoIngressParser(
 parser IngressParser(
                 packet_in packet,
                 out headers_t hdr,
-                inout ig_metadata_t ig_md,
+                out ig_metadata_t ig_md,
                 out ingress_intrinsic_metadata_t ig_intr_md) {
     
-    TofinoIngressParser tof_ingress_parser();
+    TofinoIngressParser() tof_ingress_parser;
 
     state start {
-        tof_ingress_parser.apply(packet, ig_md, ig_intr_md)    
+        tof_ingress_parser.apply(packet, ig_md, ig_intr_md);
+
         transition parse_ethernet;
     }
 
@@ -238,123 +210,56 @@ parser IngressParser(
 
 		transition select(hdr.ethernet.etherType){
 			TYPE_IPV6: parse_ipv6;
-			TYPE_SIP:  parse_sip;
+			LOAD_KEY_1: parse_keys;
+			LOAD_KEY_2: parse_keys;
+			MAC_1: parse_mac_partial;
+			MAC_2: parse_mac_full;
+			SIP_AUTHENTICATOR:  parse_sip;
+			SIP_VALIDATION: parse_sip;
+
 			default: accept;
 		}
     }
+
+	state parse_keys {
+		packet.extract(hdr.key_loader);
+		packet.extract(hdr.sip);
+		transition accept;
+	}
 
 	state parse_sip {
 		packet.extract(hdr.sip);
 		packet.extract(hdr.sip_meta);
-		transition select(hdr.sip.headerType){
-			TYPE_IPV6: parse_ipv6;
-			default: accept;
-		}
+		transition accept;
 	}
 
-    state parse_ipv6{
+	state parse_ipv6{
         packet.extract(hdr.ipv6);
         transition select(hdr.ipv6.nextHeader){
-            IPV6_ROUTE: parse_route;
             EPIC: parse_epic;
-            default: parse_ipv6_ext_chain_before_SR;
+			default: accept;
         }
     }
 
-    state parse_route {
-        packet.extract(hdr.route_header);
- 
-        transition select((hdr.route_header.headerLength / 2) > MAX_SRV6_SEGMENTS) {
-            true: reject;
-            false: parse_route_list;
-        }
-    }
+	state parse_mac_partial {
+		packet.extract(hdr.mac);
+		packet.extract(hdr.ipv6);
+		packet.extract(hdr.epic);
+		transition accept;
+	}
 
-    state parse_route_list {
-        packet.extract(hdr.segment_list, (bit<32>) (hdr.route_header.headerLength / 2));
-
-        ig_md.segment_list_count = hdr.segment_list.lastIndex + 1;
-        ig_md.ext_idx = 0;
-
-        transition select(hdr.route_header.nextHeader){
-            EPIC: parse_epic;
-            default: parse_ipv6_ext_chain_after_SR;
-        }
-    }
-
-    state parse_ipv6_ext_chain_before_SR {
-        ipv6_ext_fixed_t peek;
-        packet.lookahead(peek); // does not advance cursor
-
-        bit<32> len_bytes = ((bit<32>)(peek.hdrExtLen + 1)) * 8; // RFC: units of 8 bytes
-        // We already account for the fixed first 2 bytes because the varbit header extracts total length
-        // Define ipv6_ext_base_t so its varbit 'data' absorbs len_bytes - 2
-        
-        packet.extract(hdr.ipv6_ext_base_before_SR[ig_md.ext_idx], len_bytes * 8);
-        hdr.ipv6_ext_base_before_SR[ig_md.ext_idx].setValid();
-        ig_md.ext_idx = ig_md.ext_idx + 1;
-
-        transition select(peek.nextHeader) {
-            HOPOPT: parse_ipv6_ext_chain_before_SR;
-            IPV6_ROUTE: parse_route;
-            IPV6_FRAG: parse_ipv6_ext_chain_before_SR;
-            ESP: parse_ipv6_ext_chain_before_SR;
-            AH: parse_ipv6_ext_chain_before_SR;
-            IPV6_OPTS: parse_ipv6_ext_chain_before_SR;
-            MOBILITY_HEADER: parse_ipv6_ext_chain_before_SR;
-            HIP: parse_ipv6_ext_chain_before_SR;
-            SHIM6: parse_ipv6_ext_chain_before_SR;
-            BIT_EMU: parse_ipv6_ext_chain_before_SR;
-
-            // parse epic
-            EPIC: parse_epic;
-
-            default: accept;
-        }
-    }
-
-    state parse_ipv6_ext_chain_after_SR {
-        ipv6_ext_fixed_t peek;
-        packet.lookahead(peek); // does not advance cursor
-
-        bit<32> len_bytes = ((bit<32>)(peek.hdrExtLen + 1)) * 8; // RFC: units of 8 bytes
-        // We already account for the fixed first 2 bytes because the varbit header extracts total length
-        // Define ipv6_ext_base_t so its varbit 'data' absorbs len_bytes - 2
-        
-        packet.extract(hdr.ipv6_ext_base_after_SR[ig_md.ext_idx], len_bytes * 8);
-        hdr.ipv6_ext_base_after_SR[ig_md.ext_idx].setValid();
-        ig_md.ext_idx = ig_md.ext_idx + 1;
-
-        transition select(peek.nextHeader) {
-            HOPOPT: parse_ipv6_ext_chain_after_SR;
-            IPV6_FRAG: parse_ipv6_ext_chain_after_SR;
-            ESP: parse_ipv6_ext_chain_after_SR;
-            AH: parse_ipv6_ext_chain_after_SR;
-            IPV6_OPTS: parse_ipv6_ext_chain_after_SR;
-            MOBILITY_HEADER: parse_ipv6_ext_chain_after_SR;
-            HIP: parse_ipv6_ext_chain_after_SR;
-            SHIM6: parse_ipv6_ext_chain_after_SR;
-            BIT_EMU: parse_ipv6_ext_chain_after_SR;
-
-            // parse epic
-            EPIC: parse_epic;
-
-            default: accept;
-        }
-    }
-
+	state parse_mac_full {
+		packet.extract(hdr.mac);
+		packet.extract(hdr.ipv6);
+		packet.extract(hdr.epic);
+		packet.extract(hdr.epic_per_hop);
+		transition accept;
+	}
+   
     state parse_epic {
         packet.extract(hdr.epic);
-
-        transition select(hdr.epic.per_hop_count){
-            0: reject; // Checks the validity of the EPIC header
-            default: parse_epic_hop;
-        }
-    }
-
-    state parse_epic_hop {
-        packet.extract(hdr.epic_per_hop);
-        transition accept;
+		packet.extract(hdr.epic_per_hop);
+		transition accept;
     }
 }
 
@@ -375,15 +280,13 @@ parser TofinoEgressParser (
 // Egress parser
 parser EgressParser(packet_in packet,
 					out headers_t hdr,
+					out eg_metadata_t eg_md,
 					out egress_intrinsic_metadata_t eg_intr_md ){
 
-    TofinoEgressParser tofino_egress;
-
-	bit<4> eg_ext_idx;   // local index for ext headers
+    TofinoEgressParser() tofino_egress;
 
     state start {
         tofino_egress.apply(packet, eg_intr_md);
-		eg_ext_idx = 0;
         transition parse_ethernet;
     }
 
@@ -391,8 +294,8 @@ parser EgressParser(packet_in packet,
         packet.extract(hdr.ethernet);
 
 		transition select(hdr.ethernet.etherType){
-			TYPE_IPV6: parse_ipv6;
-			TYPE_SIP:  parse_sip;
+			SIP_AUTHENTICATOR:  parse_sip;
+			SIP_VALIDATION: parse_sip;
 			default: accept;
 		}
     }
@@ -400,113 +303,8 @@ parser EgressParser(packet_in packet,
 	state parse_sip {
 		packet.extract(hdr.sip);
 		packet.extract(hdr.sip_meta);
-		transition select(hdr.sip.headerType){
-			TYPE_IPV6: parse_ipv6;
-			default: accept;
-		}
+		transition accept;
 	}
-
-    state parse_ipv6{
-        packet.extract(hdr.ipv6);
-        transition select(hdr.ipv6.nextHeader){
-            IPV6_ROUTE: parse_route;
-            EPIC: parse_epic;
-            default: parse_ipv6_ext_chain_before_SR;
-        }
-    }
-
-    state parse_route {
-        packet.extract(hdr.route_header);
- 
-        transition select((hdr.route_header.headerLength / 2) > MAX_SRV6_SEGMENTS) {
-            true: reject;
-            false: parse_route_list;
-        }
-    }
-
-    state parse_route_list {
-        packet.extract(hdr.segment_list, (bit<32>) (hdr.route_header.headerLength / 2));
-
-        transition select(hdr.route_header.nextHeader){
-            EPIC: parse_epic;
-            default: parse_ipv6_ext_chain_after_SR;
-        }
-    }
-
-    state parse_ipv6_ext_chain_before_SR {
-        ipv6_ext_fixed_t peek;
-        packet.lookahead(peek); // does not advance cursor
-
-        bit<32> len_bytes = ((bit<32>)(peek.hdrExtLen + 1)) * 8; // RFC: units of 8 bytes
-        // We already account for the fixed first 2 bytes because the varbit header extracts total length
-        // Define ipv6_ext_base_t so its varbit 'data' absorbs len_bytes - 2
-        
-        packet.extract(hdr.ipv6_ext_base_before_SR[eg_ext_idx], len_bytes * 8);
-        hdr.ipv6_ext_base_before_SR[eg_ext_idx].setValid();
-        eg_ext_idx = eg_ext_idx + 1;
-
-        transition select(peek.nextHeader) {
-            HOPOPT: parse_ipv6_ext_chain_before_SR;
-            IPV6_ROUTE: parse_route;
-            IPV6_FRAG: parse_ipv6_ext_chain_before_SR;
-            ESP: parse_ipv6_ext_chain_before_SR;
-            AH: parse_ipv6_ext_chain_before_SR;
-            IPV6_OPTS: parse_ipv6_ext_chain_before_SR;
-            MOBILITY_HEADER: parse_ipv6_ext_chain_before_SR;
-            HIP: parse_ipv6_ext_chain_before_SR;
-            SHIM6: parse_ipv6_ext_chain_before_SR;
-            BIT_EMU: parse_ipv6_ext_chain_before_SR;
-
-            // parse epic
-            EPIC: parse_epic;
-
-            default: accept;
-        }
-    }
-
-    state parse_ipv6_ext_chain_after_SR {
-        ipv6_ext_fixed_t peek;
-        packet.lookahead(peek); // does not advance cursor
-
-        bit<32> len_bytes = ((bit<32>)(peek.hdrExtLen + 1)) * 8; // RFC: units of 8 bytes
-        // We already account for the fixed first 2 bytes because the varbit header extracts total length
-        // Define ipv6_ext_base_t so its varbit 'data' absorbs len_bytes - 2
-        
-        packet.extract(hdr.ipv6_ext_base_after_SR[eg_ext_idx], len_bytes * 8);
-        hdr.ipv6_ext_base_after_SR[eg_ext_idx].setValid();
-        eg_ext_idx = eg_ext_idx + 1;
-
-        transition select(peek.nextHeader) {
-            HOPOPT: parse_ipv6_ext_chain_after_SR;
-            IPV6_FRAG: parse_ipv6_ext_chain_after_SR;
-            ESP: parse_ipv6_ext_chain_after_SR;
-            AH: parse_ipv6_ext_chain_after_SR;
-            IPV6_OPTS: parse_ipv6_ext_chain_after_SR;
-            MOBILITY_HEADER: parse_ipv6_ext_chain_after_SR;
-            HIP: parse_ipv6_ext_chain_after_SR;
-            SHIM6: parse_ipv6_ext_chain_after_SR;
-            BIT_EMU: parse_ipv6_ext_chain_after_SR;
-
-            // parse epic
-            EPIC: parse_epic;
-
-            default: accept;
-        }
-    }
-
-    state parse_epic {
-        packet.extract(hdr.epic);
-
-        transition select(hdr.epic.per_hop_count){
-            0: reject; // Checks the validity of the EPIC header
-            default: parse_epic_hop;
-        }
-    }
-
-    state parse_epic_hop {
-        packet.extract(hdr.epic_per_hop);
-        transition accept;
-    }
 }
 
 /*************************************************************************/
@@ -523,49 +321,6 @@ control Ingress(inout headers_t hdr,
     action drop() { ig_dpr_md.drop_ctl = 0x1; }
     action nop() { }
 
-    //******************** IP based forwarding ***************************//
-    action ipv6_forward(bit<9> port){
-        hdr.ipv6.hoplim = hdr.ipv6.hoplim - 1;
-        ig_tm_md.ucast_egress_port = port;
-    }
-
-    //******************** Routing header forwarding ***************************//
-    action nextDestination() {
-        bit<8> index = ig_md.segment_list_count - hdr.route_header.segmentsLeft;
-        hdr.ipv6.dstAddr = hdr.segment_list[index].address;
-        hdr.route_header.segmentsLeft = hdr.route_header.segmentsLeft - 1;
-    }
-
-    // IPv6 table
-    table ipv6_forwarding {
-        key = {
-            hdr.ipv6.dstAddr: lpm;
-        }
-
-        actions = {
-            ipv6_forward;
-            drop;
-        }
-
-        size = 2048;
-        default_action = drop();
-    }
-
-    // Routing table
-    table sr_forwarding {
-        key = {
-            hdr.ipv6.dstAddr: exact;
-        }
-
-        actions = {
-            nextDestination;
-            nop;
-        }
-
-        size = 1024;
-        default_action = nop();
-    }
-
 	/*
 	 *
 	 *  Halfisip-hash implementation
@@ -573,17 +328,6 @@ control Ingress(inout headers_t hdr,
 	 *
 	 */
 
-	action build_sip_from_epic(){
-		hdr.sip.setValid();
-
-		hdr.sip.headerType = hdr.ethernet.etherType;
-		hdr.ethernet.etherType = TYPE_SIP;
-
-		hdr.sip.m_0 = (bit<32>)(hdr.epic.src_as_host[63:32]);
-		hdr.sip.m_1 = (bit<32>)(hdr.epic.src_as_host[31:0]);
-		hdr.sip.m_2 = (bit<32>)(hdr.epic.packet_ts[63:32]);
-		hdr.sip.m_3 = (bit<32>)(hdr.epic.packet_ts[31:0]);
-	}
 
     /* -------- Random for recirculation, following Princeton implementation of Halfsip-hash -------- */
     Random<bit<1>>() rng;
@@ -594,14 +338,13 @@ control Ingress(inout headers_t hdr,
     action incr_and_recirc(bit<8> next_round){
 		hdr.sip_meta.curr_round = next_round;
 		do_recirculate();
-		//hdr.sip_meta.setValid();
     }
 
 	action do_not_recirc_end_in_ig(){
 		#define ig_writeout_m(i) hdr.sip.m_##i = 0;
 		__LOOP(NUM_WORDS,ig_writeout_m)
 		@in_hash { hdr.sip.m_0 = hdr.sip_meta.v_1 ^ hdr.sip_meta.v_3; }
-		hdr.sip_meta.setInvalid();
+		hdr.sip_meta.setInvalid(); //TODO!!!!!! Check egress ifs
 	}
 
 	action do_not_recirc_end_in_eg(bit<8> next_round){
@@ -619,7 +362,7 @@ control Ingress(inout headers_t hdr,
 			nop;
 		}
 		size = 32;
-		default_action = nop;
+		default_action = nop();
 		const entries = {
 			// ingress performs round 0,4,8,...
 			// even NUM_WORDS last round ends in egress, odd ends in ingress
@@ -637,6 +380,9 @@ control Ingress(inout headers_t hdr,
 
     /* -------- Halfsip actions in INGRESS, Princeton implementation  -------- */
     action sip_init(bit<32> key_0, bit<32> key_1){
+		hdr.sip_meta.setValid();
+		hdr.sip_meta.curr_round = 0;
+
         hdr.sip_meta.v_0 = key_0 ^ const_0;
         hdr.sip_meta.v_1 = key_1 ^ const_1;
         hdr.sip_meta.v_2 = key_0 ^ const_2;
@@ -794,88 +540,96 @@ control Ingress(inout headers_t hdr,
 		}
 	}
 
-	action start_first_pass(){
-		// first pass init
-		hdr.sip_meta.setValid();
-		hdr.sip_meta.curr_round=0;
+	action load_hop_authenticator(){
+		hdr.key_loader.setValid();
+		hdr.key_loader.key_0 = KEY_0;
+		hdr.key_loader.key_1 = KEY_1;
+		
+		hdr.sip.setValid();
+		hdr.sip.etherType = hdr.ethernet.etherType;
+		hdr.ethernet.etherType = LOAD_KEY_1;
 
-		sip_init(SIP_KEY_0, SIP_KEY_1);
+		hdr.sip.m_0 = hdr.epic.path_ts;
+		hdr.sip.m_1 = hdr.epic_per_hop.ingress_if
+					++ hdr.epic_per_hop.egress_if
+					++ hdr.epic_per_hop.segment_identifier;
+
+		hdr.sip.m_2 = hdr.epic_per_hop.tsexp ++ (bit<24>) 0;
+		hdr.sip.m_3 = 0;
+	}
+
+	action load_packet_authorization(){
+		hdr.key_loader.setValid();
+		ig_md.rotated_k1 = hdr.mac.calculated_mac[15:0]
+						 ++ hdr.mac.calculated_mac[31:16];
+		
+		hdr.key_loader.key_0 = hdr.mac.calculated_mac;
+		hdr.key_loader.key_1 = ig_md.rotated_k1;
+
+		hdr.sip.setValid();
+		hdr.sip.etherType = hdr.mac.etherType;
+		hdr.ethernet.etherType = LOAD_KEY_2;
+
+		hdr.sip.m_0 = (bit<32>)(hdr.epic.src_as_host[63:32]);
+		hdr.sip.m_1 = (bit<32>)(hdr.epic.src_as_host[31:0]);
+		hdr.sip.m_2 = (bit<32>)(hdr.epic.packet_ts[63:32]);
+		hdr.sip.m_3 = (bit<32>)(hdr.epic.packet_ts[31:0]);
 	}
 
     apply {
+		// Get random bit for recirculation
+		get_rnd_bit();
 
-		if(hdr.epic.isValid() && !hdr.sip.isValid() && !hdr.sip_meta.isValid()) {
-			if(!(ig_intr_md.ingress_port == 68 || ig_intr_md.ingress_port == 68 + 128)) {
-				build_sip_from_epic();
-				start_first_pass();
-			} else {
-				// If packet is EPIC but no SIP, then MAC has been calculated and it's coming from a recirculation port
-				// Then the MAC was correct
+		if (ig_md.rnd_bit == 0){
+			ig_md.rnd_port_for_recirc = 68;
+		} else{
+			ig_md.rnd_port_for_recirc = 68 + 128;
+		}
 
-				// Packet forwarding
-				if(hdr.ipv6.isValid()) {
-					ipv6_forwarding.apply();
-					
-					if(hdr.route_header.isValid() && hdr.route_header.segmentsLeft > 0) {
-						sr_forwarding.apply();
+		if(hdr.epic.isValid() && !hdr.sip.isValid()) {
+			// New packet -> Load keys and calculate hop authenticator
+			if(!(ig_intr_md.ingress_port == 68 || ig_intr_md.ingress_port == 196)) {
+				load_hop_authenticator();
+				ig_tm_md.ucast_egress_port = ig_md.rnd_port_for_recirc;
+				exit;
+			} else if(hdr.mac.isValid()){
+				if(hdr.ethernet.etherType == MAC_1){
+					load_packet_authorization();
+					ig_tm_md.ucast_egress_port = ig_md.rnd_port_for_recirc;
+				} else if(hdr.ethernet.etherType == MAC_2){
+					if((bit <24>) (hdr.mac.calculated_mac[23:0]) != hdr.epic_per_hop.hop_validation) {
+						drop();
+						exit;
 					}
-				}
 
-				// Once it's been authorized, the first per-hop header can be removed
-				hdr.epic_per_hop.setInvalid();
-
-				// Check timestamp
-				bit<64> pkt_ts  = hdr.epic.packet_ts;
-				bit<64> path_ts = (bit<64>) hdr.epic.path_ts;
-				bit<64> delta   = (bit<64>) PATH_DELTA;
-
-				// If the sip_meta is not valid, it's the last recirculation!
-				if(!(pkt_ts >= path_ts && (pkt_ts - path_ts) <= delta)){
-					ig_dpr_md.drop_ctl = 1; // drop packet
-					return;
-				}
-
-				// This was the last 
-				if(hdr.epic.per_hop_count > 1) {
-					hdr.epic.per_hop_count = hdr.epic.per_hop_count - 1;
-				} else {
-					if(hdr.ipv6.nextHeader == EPIC) {
-						hdr.ipv6.nextHeader = hdr.epic.nextHeader;
-					} else if(ig_md.ext_idx == 0){
-						hdr.route_header.nextHeader = hdr.epic.nextHeader;
+					hdr.ethernet.etherType = hdr.mac.etherType;
+					if(hdr.epic.per_hop_count > 1) {
+						hdr.epic.per_hop_count = hdr.epic.per_hop_count - 1;
 					} else {
-						hdr.ipv6_ext_base_after_SR[ig_md.ext_idx - 1].nextHeader = hdr.epic.nextHeader;
+						hdr.ipv6.nextHeader = hdr.epic.nextHeader;
+						hdr.epic.setInvalid();
 					}
 
-					hdr.epic.setInvalid();
+					hdr.epic_per_hop.setInvalid();
 				}
 
+				hdr.mac.setInvalid();
 				exit;
 			}
 		}
 
+		if(!hdr.sip.isValid()) { exit; }
+		if(!hdr.sip_meta.isValid()) {
+			sip_init(hdr.key_loader.key_0, hdr.key_loader.key_1);
 
-		// If SIP is not present and it’s not EPIC, you probably want to skip HalfSip entirely
-		// and just do normal IPv6 forwarding. For L1-only switches, you could do:
-		if (!hdr.epic.isValid()) {
-			// e.g., normal IPv6 forwarding path here
-			ipv6_forwarding.apply();
-			if (hdr.route_header.isValid() && hdr.route_header.segmentsLeft > 0) {
-				sr_forwarding.apply();
-			}
-			exit;
+			if(hdr.ethernet.etherType == LOAD_KEY_1) hdr.ethernet.etherType = SIP_AUTHENTICATOR;
+			else if(hdr.ethernet.etherType == LOAD_KEY_2) hdr.ethernet.etherType = SIP_VALIDATION;
+			hdr.key_loader.setInvalid();
 		}
 
-		// 3. Now we know: EPIC + SIP present
-		//    sip_meta MUST be valid if we created SIP correctly.
-		if (!hdr.sip_meta.isValid()) {
-			// This shouldn't happen in your controlled pipeline.
-			// Safer to drop or re-init; I’d drop to avoid desync:
-			drop();
-			exit;
-		}
+		
 
-    	// 4. Select which “start_m_*” or “start_finalization_*” to run for this pass
+		// Halfsip hash calculations
     	tb_start_round.apply();
 
 		//compression round: xor msg
@@ -901,19 +655,12 @@ control Ingress(inout headers_t hdr,
 		//v0^=m
 		sip_4_b_even();
 
-		// randomly choose a recirculation port
-		get_rnd_bit();
-
-        // Replaced below with one-liner
-        ig_md.rnd_port_for_recirc = (ig_md.rnd_bit == 0) ? 68 : 68 + 128;
-
-		// if (ig_md.rnd_bit == 0){
-		// 	ig_md.rnd_port_for_recirc = 68;
-		// } else{
-		// 	ig_md.rnd_port_for_recirc = 68 + 128;
-		// }
-
 		tb_recirc_decision.apply();
+
+		if((NUM_WORDS%2==0 && hdr.sip_meta.curr_round == (NUM_WORDS*2+2)) ||
+		   (NUM_WORDS%2==1 && hdr.sip_meta.curr_round == (NUM_WORDS*2))) {
+			ig_tm_md.ucast_egress_port = ig_md.rnd_port_for_recirc;
+		}
     }
 }
 
@@ -927,32 +674,14 @@ control Egress(inout headers_t hdr,
 			   in egress_intrinsic_metadata_from_parser_t eg_intr_md_from_prsr,
 			   inout egress_intrinsic_metadata_for_deparser_t eg_intr_md_for_dprsr,
 			   inout egress_intrinsic_metadata_for_output_port_t eg_intr_oport_md) {
-
-	Random<bit<1>>() rng_eg;
     
     action nop() {
 	}
 
-	action final_round_xor_checkmac_recirculate(){
+	action final_round_xor(){
 		#define eg_writeout_m(i) hdr.sip.m_##i = 0;
 		__LOOP(NUM_WORDS,eg_writeout_m)
 		@in_hash { hdr.sip.m_0 = hdr.sip_meta.v_1 ^ hdr.sip_meta.v_3; }
-
-
-        // check HalfSip against EPIC per-hop MAC after it has been calculated
-        bit<24> mac24 = (bit<24>)(hdr.sip.m_0 & 0x00FF_FFFF);
-        if (mac24 != hdr.epic_per_hop.hop_validation) {
-            eg_intr_md_for_dprsr.drop_ctl = 1; // drop packet
-            return;
-        }
-
-		hdr.ethernet.etherType = hdr.sip.headerType;
-
-		hdr.sip_meta.setInvalid();
-        if (hdr.sip.isValid()) { hdr.sip.setInvalid(); }  // if you parsed a SIP header at all
-
-        // last recirculation
-        eg_intr_oport_md.ucast_egress_port = (rng_eg.get() == 0) ? 68 : 68 + 128;
 	}
 
 	action sip_init(bit<32> key_0, bit<32> key_1){
@@ -1067,10 +796,10 @@ control Egress(inout headers_t hdr,
 			#define eg_match_start_m(i) __MUL(2,i, eg_match_start_m_mul2)
 			#if NUM_WORDS%2==0
 				__LOOP(NUM_WORDS_EG, eg_match_start_m)
-				(2*NUM_WORDS+2): start_finalization_b;
+				(2*NUM_WORDS+2): start_finalization_b();
 			#else
 				__LOOP(NUM_WORDS_EG, eg_match_start_m)
-				(2*NUM_WORDS): start_finalization_a;
+				(2*NUM_WORDS): start_finalization_a();
 			#endif
 		}
 	}
@@ -1109,20 +838,16 @@ control Egress(inout headers_t hdr,
 			#define eg_match_pre_end_m(i) __MUL(2,i, eg_match_pre_end_m_mul2)
 			#if NUM_WORDS%2==0
 				__LOOP(NUM_WORDS_EG, eg_match_pre_end_m)
-				(2*NUM_WORDS+2): start_finalization_b;
+				(2*NUM_WORDS+2): start_finalization_b();
 			#else
 				__LOOP(NUM_WORDS_EG, eg_match_pre_end_m)
-				(2*NUM_WORDS): start_finalization_a;
+				(2*NUM_WORDS): start_finalization_a();
 			#endif
 		}
 	}
 
 	apply {
-		if (!hdr.epic.isValid()) {
-        	return;
-    	}
-
-		if(!hdr.sip_meta.isValid()) return;
+		if(!(hdr.sip.isValid() || hdr.sip_meta.isValid())) { exit; }
 		else tb_start_round.apply();
 
 		// compression round: xor msg
@@ -1150,8 +875,17 @@ control Egress(inout headers_t hdr,
 		if(hdr.sip_meta.curr_round < (NUM_WORDS*2+2)){
 			// need more rounds in ingress pipeline, packet should be during recirculation right now
 			hdr.sip_meta.curr_round = hdr.sip_meta.curr_round + 2;
-		}else{
-			final_round_xor_checkmac_recirculate();
+		} else {
+			final_round_xor();
+
+			hdr.mac.setValid();
+			hdr.mac.calculated_mac = hdr.sip.m_0;
+			hdr.mac.etherType = hdr.sip.etherType;
+			if(hdr.ethernet.etherType == SIP_AUTHENTICATOR) hdr.ethernet.etherType = MAC_1;
+			else if(hdr.ethernet.etherType == SIP_VALIDATION) hdr.ethernet.etherType = MAC_2;
+
+			hdr.sip.setInvalid();
+			hdr.sip_meta.setInvalid();
 		}
 	}
 }
@@ -1168,27 +902,16 @@ control IngressDeparser(
 	apply {
 		packet.emit(hdr.ethernet);
 
+		packet.emit(hdr.key_loader);
+		packet.emit(hdr.mac); // TODO? Should the MAC be deparsed in the ingress? When? Why?
+
 		// Emit sip and sip_meta only during recirculation
-        if(hdr.sip.isValid()) packet.emit(hdr.sip);
-        if(hdr.sip_meta.isValid()) packet.emit(hdr.sip_meta);
+        packet.emit(hdr.sip);
+        packet.emit(hdr.sip_meta);
 
 		packet.emit(hdr.ipv6);
-
-        // IPv6 extension headers
-        packet.emit(hdr.ipv6_ext_base_before_SR);
-
-        // Route header
-        packet.emit(hdr.route_header);
-        packet.emit(hdr.segment_list);
-
-        // IPv6 extension headers
-        packet.emit(hdr.ipv6_ext_base_after_SR);
-
-		if(hdr.epic.isValid()) packet.emit(hdr.epic);
-		/*
-         * The `epic_per_hop` header is never emitted since, once it's used, it will never be used by the subsenquent routers and
-         * not emitting it will save space/time, especially for fast connections.
-        */
+		packet.emit(hdr.epic);
+		packet.emit(hdr.epic_per_hop);
 	}
 }
 
@@ -1200,35 +923,17 @@ control EgressDeparser(
 	
     apply {
 		packet.emit(hdr.ethernet);
-
-        // Emit sip and sip_meta only during recirculation
-        if(hdr.sip.isValid()) packet.emit(hdr.sip);
-        if(hdr.sip_meta.isValid()) packet.emit(hdr.sip_meta);
-
-		packet.emit(hdr.ipv6);
-
-        // IPv6 extension headers
-        packet.emit(hdr.ipv6_ext_base_before_SR);
-
-        // Route header
-        packet.emit(hdr.route_header);
-        packet.emit(hdr.segment_list);
-
-        // IPv6 extension headers
-        packet.emit(hdr.ipv6_ext_base_after_SR);
-
-		if(hdr.epic.isValid()) packet.emit(hdr.epic);
-		/*
-         * The `epic_per_hop` header is never emitted since, once it's used, it will never be used by the subsenquent routers and
-         * not emitting it will save space/time, especially for fast connections.
-        */
+		packet.emit(hdr.mac);
+        packet.emit(hdr.sip);
+        packet.emit(hdr.sip_meta);
 	}
 }
+
+
 
 /*************************************************************************/
 /**************************  S W I T C H  ********************************/
 /*************************************************************************/
-
 Pipeline(
     IngressParser(),
     Ingress(),
@@ -1237,3 +942,5 @@ Pipeline(
     Egress(),
     EgressDeparser()
 ) pipe;
+
+Switch(pipe) main;
