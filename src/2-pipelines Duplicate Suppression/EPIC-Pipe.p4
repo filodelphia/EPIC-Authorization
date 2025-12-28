@@ -10,8 +10,22 @@
 
 // Low maximum for testing only
 #ifndef MAX_SRH
-#define MAX_SRH 4
+	#define MAX_SRH 4
 #endif
+
+#ifndef EPIC_PIPE_PORT
+	#define EPIC_PIPE_PORT 68
+#endif
+#ifndef MAC_PIPE_PORT
+	#define MAC_PIPE_PORT 196
+#endif
+
+// EPIC freshness via timestamps
+#ifndef EPIC_REG_SIZE
+	#define EPIC_REG_SIZE 4096
+#endif
+
+const bit<32> EPIC_TMP_MASK = (bit<32>)(EPIC_REG_SIZE - 1);
 
 // Layer 3 definitions
 const bit<8> IPV6_ROUTE = 43;
@@ -69,7 +83,7 @@ header epic_per_hop_h {
 ************************** S T R U C T S *********************************
 *************************************************************************/
 
-struct headers_t {
+struct epic_headers_t {
 	// Layer 2 headers
     ethernet_h ethernet;
 
@@ -87,30 +101,38 @@ struct headers_t {
 }
 
 // Metadata
-struct ig_metadata_t {
+struct epic_ig_metadata_t {
 	// Key rotation
 	bit<32> rotated_k1;
 
-    // Half-sip hash metadata
-	bit<1> rnd_bit;
-	bit<9> rnd_port_for_recirc;
 	bool early_exit;
 
 	// EPIC freshness
-    bit<64> now_unix_s;
+    bool cp_hit;
+	bit<32> cp_index;
+	bit<32> tmp_index;
+	bit<64> new_ts;
+	bit<64> prev_ts;
 }
 
-struct eg_metadata_t {
+struct epic_eg_metadata_t {
 }
+
+// Registers
+Register<bit<64>, bit<32>>(EPIC_REG_SIZE) reg_po_cp;
+Register<bit<64>, bit<32>>(EPIC_REG_SIZE) reg_po_tmp;
+
+// Hash
+Hash<bit<32>>(HashAlgorithm_t.CRC32) po_hash;
 
 
 /*************************************************************************/
 /**************************  P A R S E R  ********************************/
 /*************************************************************************/
 // Tofino Ingress parser
-parser TofinoIngressParser(
+parser EpicTofinoIngressParser(
     packet_in packet,
-    inout ig_metadata_t ig_md,
+    inout epic_ig_metadata_t ig_md,
     out ingress_intrinsic_metadata_t ig_intr_md) {
         state start {
             packet.extract(ig_intr_md);
@@ -133,13 +155,13 @@ parser TofinoIngressParser(
 }
 
 // Switch parser
-parser IngressParser(
+parser EpicIngressParser(
                 packet_in packet,
-                out headers_t hdr,
-                out ig_metadata_t ig_md,
+                out epic_headers_t hdr,
+                out epic_ig_metadata_t ig_md,
                 out ingress_intrinsic_metadata_t ig_intr_md) {
     
-    TofinoIngressParser() tof_ingress_parser;
+    EpicTofinoIngressParser() tof_ingress_parser;
 
 	ParserCounter() pc;
 
@@ -229,7 +251,7 @@ parser IngressParser(
 
 
 // Tofino egress parser
-parser TofinoEgressParser (
+parser EpicTofinoEgressParser (
     packet_in packet,
     out egress_intrinsic_metadata_t eg_intr_md){
 
@@ -240,13 +262,13 @@ parser TofinoEgressParser (
 
 }
 
-// Egress parser
-parser EgressParser(packet_in packet,
-					out headers_t hdr,
-					out eg_metadata_t eg_md,
+// EpicEgress parser
+parser EpicEgressParser(packet_in packet,
+					out epic_headers_t hdr,
+					out epic_eg_metadata_t eg_md,
 					out egress_intrinsic_metadata_t eg_intr_md ){
 
-    TofinoEgressParser() tofino_egress;
+    EpicTofinoEgressParser() tofino_egress;
 
     state start {
         tofino_egress.apply(packet, eg_intr_md);
@@ -258,8 +280,8 @@ parser EgressParser(packet_in packet,
 /*****************  I N G R E S S   P R O C E S S I N G  *****************/
 /*************************************************************************/
 
-control Ingress(inout headers_t hdr,
-                inout ig_metadata_t ig_md,
+control EpicIngress(inout epic_headers_t hdr,
+                inout epic_ig_metadata_t ig_md,
                 in ingress_intrinsic_metadata_t ig_intr_md,
                 in ingress_intrinsic_metadata_from_parser_t ig_prsr_md,
                 inout ingress_intrinsic_metadata_for_deparser_t ig_dpr_md,
@@ -268,11 +290,9 @@ control Ingress(inout headers_t hdr,
     action drop() { ig_dpr_md.drop_ctl = 0x1; }
     action nop() { }
 
-    /* -------- Random for recirculation -------- */
-    Random<bit<1>>() rng;
-    action get_rnd_bit() { ig_md.rnd_bit = rng.get(); }
     action route_to(bit<9> port) { ig_tm_md.ucast_egress_port = port; }
-    action do_recirculate() { route_to(ig_md.rnd_port_for_recirc); }
+    action do_recirculate() { route_to(EPIC_PIPE_PORT); }
+	action to_mac_pipe() { route_to(MAC_PIPE_PORT); }
 
 
 	/*
@@ -296,8 +316,7 @@ control Ingress(inout headers_t hdr,
 		hdr.ethernet.etherType = HOP_MAC_LOAD_ETHERTYPE;
 		hdr.mac_load.nextJob = HOP_MAC_RESULT_ETHERTYPE;
 
-		// TODO: Route to HalfSip PIPE
-		ig_tm_md.ucast_egress_port = ig_md.rnd_port_for_recirc;
+		to_mac_pipe();
 		ig_md.early_exit = true;
 	}
 
@@ -319,8 +338,7 @@ control Ingress(inout headers_t hdr,
 		hdr.mac_load.nextJob = AUTH_MAC_RESULT_ETHERTYPE;
 
 		hdr.mac_res.setInvalid();
-		// TODO: Route to HalfSip PIPE
-		ig_tm_md.ucast_egress_port = ig_md.rnd_port_for_recirc;
+		to_mac_pipe();
 		ig_md.early_exit = true;
 	}
 
@@ -339,9 +357,63 @@ control Ingress(inout headers_t hdr,
 		default_action = nop();
 	}
 
-	// EPIC Freshness
-	action load_now_unix_s() {
-    	reg_unix_now_s.read(ig_md.now_unix_s, 0);
+	// Timestamp freshness enforcement
+	action compute_ts(){
+		ig_md.new_ts = (bit<64>) hdr.epic.packet_ts + (bit<64>) hdr.epic.path_ts;
+	}
+
+	action po_hash_to_index(){
+		bit<32> hash = po_hash.get({
+			hdr.epic.src_as_host,
+			hdr.epic_per_hop.segment_identifier
+		});
+
+		ig_md.tmp_index = hash & EPIC_TMP_MASK;
+	}
+
+	action po_cp_read(bit<32> idx) {
+		reg_po_cp.read(ig_md.prev_ts, idx);
+	}
+
+	action po_tmp_read(bit<32> idx) {
+		reg_po_tmp.read(ig_md.prev_ts, idx);
+	}
+
+	action po_cp_write(bit<32> idx) {
+		reg_po_cp.write(idx, ig_md.new_ts);
+	}
+
+	action po_tmp_write(bit<32> idx) {
+		reg_po_tmp.write(idx, ig_md.new_ts);
+	}
+
+	action po_tmp_clear(bit<32> idx) {
+		reg_po_tmp.write(idx, (bit<64>) 0);
+	}
+
+	action set_cp_index(bit<32> index){
+		ig_md.cp_index = index;
+		ig_md.cp_hit = true;
+	}
+
+	action cp_miss(){
+		ig_md.cp_index = 0;
+		ig_md.cp_hit = false;
+	}
+
+	table epic_ts_freshness {
+		key = {
+			hdr.epic.src_as_host: exact;
+			hdr.epic_per_hop.segment_identifier: exact;
+		}
+
+		actions = {
+			set_cp_index;
+			cp_miss;
+		}
+
+		default_action = cp_miss();
+		size = 1024;
 	}
 
 	/*
@@ -376,13 +448,19 @@ control Ingress(inout headers_t hdr,
     apply {
 		ig_md.early_exit = false;
 		
-		// Get random bit for recirculation
-		get_rnd_bit();
+		if(hdr.ethernet.etherType == TYPE_IPV6){
+			compute_ts();
+			po_hash_to_index();
+			
+			epic_ts_freshness.apply();
 
-		if (ig_md.rnd_bit == 0){
-			ig_md.rnd_port_for_recirc = 68;
-		} else{
-			ig_md.rnd_port_for_recirc = 68 + 128;
+			if(ig_md.cp_hit) po_cp_read(ig_md.cp_index);
+			else po_tmp_read(ig_md.tmp_index);
+
+			if(ig_md.prev_ts != 0 && ig_md.new_ts <= ig_md.prev_ts){
+				drop();
+				exit;
+			}
 		}
 
 		epic_stage.apply();
@@ -392,8 +470,27 @@ control Ingress(inout headers_t hdr,
 		if(hdr.ethernet.etherType == AUTH_MAC_RESULT_ETHERTYPE){
 			if((bit <24>)(hdr.mac_res.calculated_mac[23:0]) != hdr.epic_per_hop.hop_validation){
 				drop();
+				exit;
 			}
 
+			// Update timestamp
+			compute_ts();
+			po_hash_to_index();
+			epic_ts_freshness.apply();
+			if(ig_md.cp_hit){
+				po_cp_read(ig_md.cp_index);
+				if (ig_md.prev_ts == 0 || ig_md.new_ts > ig_md.prev_ts) {
+                	po_cp_write(ig_md.cp_index);
+            	}
+				po_tmp_clear(ig_md.tmp_index);
+			} else {
+				po_tmp_read(ig_md.tmp_index);
+				if (ig_md.prev_ts == 0 || ig_md.new_ts > ig_md.prev_ts) {
+                	po_tmp_write(ig_md.cp_index);
+            	}
+			}
+
+			// Restore packet and remove per-hop/EPIC header
 			hdr.ethernet.etherType = TYPE_IPV6;
 			hdr.mac_res.setInvalid();
 
@@ -412,8 +509,8 @@ control Ingress(inout headers_t hdr,
 /****************  E G R E S S   P R O C E S S I N G   *******************/
 /*************************************************************************/
 
-control Egress(inout headers_t hdr,
-			   inout eg_metadata_t eg_md,
+control EpicEgress(inout epic_headers_t hdr,
+			   inout epic_eg_metadata_t eg_md,
 			   in egress_intrinsic_metadata_t eg_intr_md,
 			   in egress_intrinsic_metadata_from_parser_t eg_intr_md_from_prsr,
 			   inout egress_intrinsic_metadata_for_deparser_t eg_intr_md_for_dprsr,
@@ -430,10 +527,10 @@ control Egress(inout headers_t hdr,
 /***********************  D E P A R S E R  *******************************/
 /*************************************************************************/
 
-control IngressDeparser(
+control EpicIngressDeparser(
 		packet_out packet,
-		inout headers_t hdr,
-		in ig_metadata_t ig_md,
+		inout epic_headers_t hdr,
+		in epic_ig_metadata_t ig_md,
 		in ingress_intrinsic_metadata_for_deparser_t ig_intr_dprsr_md) {
 	apply {
 		packet.emit(hdr.ethernet);
@@ -446,10 +543,10 @@ control IngressDeparser(
 	}
 }
 
-control EgressDeparser(
+control EpicEgressDeparser(
 		packet_out packet,
-		inout headers_t hdr,
-		in eg_metadata_t eg_md,
+		inout epic_headers_t hdr,
+		in epic_eg_metadata_t eg_md,
 		in egress_intrinsic_metadata_for_deparser_t eg_intr_md_for_dprsr) {
 	
     apply {
@@ -463,12 +560,10 @@ control EgressDeparser(
 /**************************  S W I T C H  ********************************/
 /*************************************************************************/
 Pipeline(
-    IngressParser(),
-    Ingress(),
-    IngressDeparser(),
-    EgressParser(),
-    Egress(),
-    EgressDeparser()
-) pipe;
-
-Switch(pipe) main;
+    EpicIngressParser(),
+    EpicIngress(),
+    EpicIngressDeparser(),
+    EpicEgressParser(),
+    EpicEgress(),
+    EpicEgressDeparser()
+) EpicPipe;

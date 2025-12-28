@@ -1,0 +1,101 @@
+{
+  "schema_version": "3.0.1",
+  "target": "tofino",
+  "build_date": "Sun Dec 28 05:48:35 2025",
+  "compiler_version": "9.13.4 (17ade03c1)",
+  "compilation_succeeded": true,
+  "compilation_time": "13.460351705551147",
+  "run_id": "155239e1c3294438",
+  "target_data": {
+    "architecture": "tna",
+    "architectureConfig": {
+      "name": "32q",
+      "pipes": [
+        {
+          "pipe": 0,
+          "ingress": {
+            "pipeName": "EpicIngress",
+            "nextControl": [
+              {
+                "pipe": 0,
+                "pipeName": "EpicEgress"
+              },
+              {
+                "pipe": 1,
+                "pipeName": "HalfSipHashEgress"
+              }
+            ]
+          },
+          "egress": {
+            "pipeName": "EpicEgress",
+            "nextControl": []
+          }
+        },
+        {
+          "pipe": 1,
+          "ingress": {
+            "pipeName": "HalfSipHashIngress",
+            "nextControl": [
+              {
+                "pipe": 0,
+                "pipeName": "EpicEgress"
+              },
+              {
+                "pipe": 1,
+                "pipeName": "HalfSipHashEgress"
+              }
+            ]
+          },
+          "egress": {
+            "pipeName": "HalfSipHashEgress",
+            "nextControl": [
+              {
+                "pipe": 1,
+                "pipeName": "HalfSipHashIngress"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "conf_file": "multipipeline.conf"
+  },
+  "programs": [
+    {
+      "program_name": "multipipeline.p4",
+      "p4_version": "p4-16",
+      "source_files": {
+        "src_root": "/mnt/hgfs/EPIC-Authorization/src/2-pipelines",
+        "includes": [],
+        "defines": []
+      },
+      "pipes": [
+        {
+          "pipe_id": 0,
+          "pipe_name": "EpicPipe",
+          "files": {
+            "context": {
+              "path": "EpicPipe/context.json"
+            },
+            "resources": [],
+            "graphs": [],
+            "logs": []
+          }
+        },
+        {
+          "pipe_id": 1,
+          "pipe_name": "HalfSipHashPipe",
+          "files": {
+            "context": {
+              "path": "HalfSipHashPipe/context.json"
+            },
+            "resources": [],
+            "graphs": [],
+            "logs": []
+          }
+        }
+      ]
+    }
+  ],
+  "compile_command": "/home/fili/open-p4studio/install/bin/p4c multipipeline.p4"
+}

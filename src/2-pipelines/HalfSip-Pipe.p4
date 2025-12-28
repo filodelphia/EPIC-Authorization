@@ -21,8 +21,12 @@ const bit<32> const_3 = 0x74656462;
 #include "../../include/cross_def.h"
 #include "../../include/cross_headers.p4"
 
-#include <core.p4>
-#include <tna.p4>
+#ifndef EPIC_PIPE_PORT
+	#define EPIC_PIPE_PORT 68
+#endif
+#ifndef MAC_PIPE_PORT
+	#define MAC_PIPE_PORT 196
+#endif
 
 /*************************************************************************
 ************************** H E A D E R S *********************************
@@ -59,7 +63,7 @@ struct sip_tmp_t {
 	bit<8> round_type;
 }
 
-struct headers_t {
+struct hsh_headers_t {
 	ethernet_h ethernet;
 	sip_inout_h sip;
 	sip_meta_h sip_meta;
@@ -68,24 +72,22 @@ struct headers_t {
 	mac_result_h mac_res;
 }
 
-struct ig_metadata_t {
+struct hsh_ig_metadata_t {
 	sip_tmp_t sip_tmp;
 
 	bool recirc;
-	bit<9> rnd_port_for_recirc;
-	bit<1> rnd_bit;
 }
 
-struct eg_metadata_t {
+struct hsh_eg_metadata_t {
 	sip_tmp_t sip_tmp;
 }
 
 /*************************************************************************/
 /**************************  P A R S E R  ********************************/
 /*************************************************************************/
-parser TofinoIngressParser(
+parser HalfSipHashTofinoIngressParser(
     packet_in packet,
-    inout ig_metadata_t ig_md,
+    inout hsh_ig_metadata_t ig_md,
     out ingress_intrinsic_metadata_t ig_intr_md) {
     
 	state start {
@@ -108,13 +110,13 @@ parser TofinoIngressParser(
     }
 }
 
-parser IngressParser(
+parser HalfSipHashIngressParser(
     packet_in packet,
-    out headers_t hdr,
-    out ig_metadata_t ig_md,
+    out hsh_headers_t hdr,
+    out hsh_ig_metadata_t ig_md,
     out ingress_intrinsic_metadata_t ig_intr_md) {
 
-	TofinoIngressParser() tofino_parser;
+	HalfSipHashTofinoIngressParser() tofino_parser;
 
 	state start {
 		tofino_parser.apply(packet, ig_md, ig_intr_md);
@@ -145,7 +147,7 @@ parser IngressParser(
 	}
 }
 
-parser TofinoEgressParser(
+parser HalfSipHashTofinoEgressParser(
 		packet_in packet,
 		out egress_intrinsic_metadata_t eg_intr_md) {
 
@@ -155,13 +157,13 @@ parser TofinoEgressParser(
 	}
 }
 
-parser EgressParser(
+parser HalfSipHashEgressParser(
 		packet_in packet,
-		out headers_t hdr,
-		out eg_metadata_t eg_md,
+		out hsh_headers_t hdr,
+		out hsh_eg_metadata_t eg_md,
 		out egress_intrinsic_metadata_t eg_intr_md) {
 
-	TofinoEgressParser() tofino_parser;
+	HalfSipHashTofinoEgressParser() tofino_parser;
 
 	state start {
 		tofino_parser.apply(packet, eg_intr_md);
@@ -186,10 +188,10 @@ parser EgressParser(
 /*************************************************************************/
 /***********************  D E P A R S E R  *******************************/
 /*************************************************************************/
-control IngressDeparser(
+control HalfSipHashIngressDeparser(
 		packet_out packet,
-		inout headers_t hdr,
-		in ig_metadata_t ig_md,
+		inout hsh_headers_t hdr,
+		in hsh_ig_metadata_t ig_md,
 		in ingress_intrinsic_metadata_for_deparser_t ig_intr_dprsr_md) {
 	apply {
 		packet.emit(hdr.ethernet);
@@ -199,10 +201,10 @@ control IngressDeparser(
 	}
 }
 
-control EgressDeparser(
+control HalfSipHashEgressDeparser(
 		packet_out packet,
-		inout headers_t hdr,
-		in eg_metadata_t eg_md,
+		inout hsh_headers_t hdr,
+		in hsh_eg_metadata_t eg_md,
 		in egress_intrinsic_metadata_for_deparser_t eg_intr_md_for_dprsr) {
 	apply {
 		packet.emit(hdr.ethernet);
@@ -215,9 +217,9 @@ control EgressDeparser(
 /*************************************************************************/
 /*****************  I N G R E S S   P R O C E S S I N G  *****************/
 /*************************************************************************/
-control Ingress(
-		inout headers_t hdr,
-		inout ig_metadata_t ig_md,
+control HalfSipHashIngress(
+		inout hsh_headers_t hdr,
+		inout hsh_ig_metadata_t ig_md,
 		in ingress_intrinsic_metadata_t ig_intr_md,
 		in ingress_intrinsic_metadata_from_parser_t ig_intr_prsr_md,
 		inout ingress_intrinsic_metadata_for_deparser_t ig_intr_dprsr_md,
@@ -230,24 +232,10 @@ control Ingress(
 	action nop() {
 	}
 	
-	action route_to(bit<9> port){
-		ig_intr_tm_md.ucast_egress_port=port;
-	}
-
-	//select one of two ports for recirculation
-	Random< bit<1> >() rng;
-
-	action get_rnd_bit(){
-		ig_md.rnd_bit = rng.get();
-	}
-
-	action do_recirculate(){
-		route_to(ig_md.rnd_port_for_recirc);
-	}
-
-	action to_epic_pipeline(){
-		route_to(1/*TODO*/);
-	}
+	action route_to(bit<9> port){ ig_intr_tm_md.ucast_egress_port=port; }
+	action to_mac_pipe() { route_to(MAC_PIPE_PORT); }
+	action to_epic_pipe() { route_to(EPIC_PIPE_PORT); }
+    action do_recirculate() { to_mac_pipe(); }
 
 	action incr_and_recirc(bit<8> next_round){
 		hdr.sip_meta.curr_round = next_round;
@@ -257,7 +245,7 @@ control Ingress(
 	}
 
 	action do_not_recirc_end_in_ig(){
-		to_epic_pipeline();
+		to_epic_pipe();
 		#define ig_writeout_m(i) hdr.sip.m_##i = 0;
 		__LOOP(NUM_WORDS,ig_writeout_m)
 
@@ -271,7 +259,7 @@ control Ingress(
 	}
 
 	action do_not_recirc_end_in_eg(bit<8> next_round){
-		to_epic_pipeline();
+		to_epic_pipe();
 		hdr.sip_meta.curr_round = next_round;
 	}
 
@@ -513,14 +501,6 @@ control Ingress(
 		//v0^=m
 		sip_4_b_even();
 
-		// randomly choose a recirculation port
-		get_rnd_bit();
-		if (ig_md.rnd_bit == 0){
-			ig_md.rnd_port_for_recirc = 68;
-		} else{
-			ig_md.rnd_port_for_recirc = 68 + 128;
-		}
-
 		tb_recirc_decision.apply();
 	}
 }
@@ -528,9 +508,9 @@ control Ingress(
 /*************************************************************************/
 /****************  E G R E S S   P R O C E S S I N G   *******************/
 /*************************************************************************/
-control Egress(
-		inout headers_t hdr,
-		inout eg_metadata_t eg_md,
+control HalfSipHashEgress(
+		inout hsh_headers_t hdr,
+		inout hsh_eg_metadata_t eg_md,
 		in egress_intrinsic_metadata_t eg_intr_md,
 		in egress_intrinsic_metadata_from_parser_t eg_intr_md_from_prsr,
 		inout egress_intrinsic_metadata_for_deparser_t eg_intr_md_for_dprsr,
@@ -753,12 +733,10 @@ control Egress(
 /**************************  S W I T C H  ********************************/
 /*************************************************************************/
 Pipeline(
-    IngressParser(),
-    Ingress(),
-    IngressDeparser(),
-    EgressParser(),
-    Egress(),
-    EgressDeparser()
-) pipe;
-
-Switch(pipe) main;
+    HalfSipHashIngressParser(),
+    HalfSipHashIngress(),
+    HalfSipHashIngressDeparser(),
+    HalfSipHashEgressParser(),
+    HalfSipHashEgress(),
+    HalfSipHashEgressDeparser()
+) HalfSipHashPipe;

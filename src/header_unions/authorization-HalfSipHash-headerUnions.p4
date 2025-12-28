@@ -22,7 +22,7 @@ const bit<32> const_3 = 0x74656462;
 #define ROUND_TYPE_FINALIZATION 1
 #define ROUND_TYPE_END 2
 
-#include "loops_macro.h"
+#include "../../include/loops_macro.h"
 #include <core.p4>
 #include <tna.p4>
 
@@ -912,7 +912,7 @@ control Egress(inout headers_t hdr,
 			else if(hdr.ethernet.etherType == SIP_VALIDATION) hdr.ethernet.etherType = MAC_2;
 
 			hdr.me_ext_headers.sip_meta.setInvalid();
-			hdr.me_ext_headers.sip_meta.setInvalid();
+			hdr.me_headers.sip.setInvalid();
 		}
 	}
 }
