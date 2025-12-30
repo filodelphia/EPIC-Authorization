@@ -1,8 +1,7 @@
 2pipe:
 	rm -rf build/2pipe
 	mkdir -p build/2pipe
-	cd build/2pipe
-	cmake $$SDE 											\
+	cmake $$SDE/p4studio -B build/2pipe						\
 		-DCMAKE_MODULE_PATH="$$SDE/cmake/"					\
 		-DCMAKE_INSTALL_PREFIX="$$SDE_INSTALL" 				\
 		-DP4C=$$SDE_INSTALL/bin/p4c 						\
@@ -11,4 +10,4 @@
 		-DP4_LANG=p4_16 									\
 		-DTOFINO=ON
 	
-	$(MAKE) -j install
+	make -C build/2pipe -j"$(nproc)" -l"$(nproc)" install

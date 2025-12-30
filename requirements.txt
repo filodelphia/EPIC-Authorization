@@ -1,2 +1,8 @@
+# Testing requirements
 siphash-cffi
 scapy
+
+# Compliation requirements
+jsl
+jsonschema
+pyinstaller

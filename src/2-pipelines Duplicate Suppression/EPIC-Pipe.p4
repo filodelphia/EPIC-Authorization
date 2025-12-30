@@ -29,7 +29,7 @@ const bit<32> EPIC_TMP_MASK = (bit<32>)(EPIC_REG_SIZE - 1);
 
 // Layer 3 definitions
 const bit<8> IPV6_ROUTE = 43;
-const bit<8> EPIC = 252;
+const bit<8> EPIC = 253;
 
 /*************************************************************************
 ************************** H E A D E R S *********************************
@@ -354,6 +354,11 @@ control EpicIngress(inout epic_headers_t hdr,
 			nop;
 		}
 
+		const entries = {
+			(TYPE_IPV6): create_hop_authenticator();
+			(HOP_MAC_RESULT_ETHERTYPE): create_packet_authorization();
+		}
+
 		default_action = nop();
 	}
 
@@ -465,7 +470,6 @@ control EpicIngress(inout epic_headers_t hdr,
 
 		epic_stage.apply();
 		if(ig_md.early_exit) { exit; }
-		srv6.apply();
 
 		if(hdr.ethernet.etherType == AUTH_MAC_RESULT_ETHERTYPE){
 			if((bit <24>)(hdr.mac_res.calculated_mac[23:0]) != hdr.epic_per_hop.hop_validation){
@@ -502,6 +506,8 @@ control EpicIngress(inout epic_headers_t hdr,
 
 			hdr.epic_per_hop.setInvalid();
 		}
+
+		srv6.apply();
     }
 }
 

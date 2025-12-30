@@ -128,6 +128,9 @@ parser HalfSipHashIngressParser(
 		transition select(hdr.ethernet.etherType) {
 			HOP_MAC_LOAD_ETHERTYPE: parse_mac_loader;
 			AUTH_MAC_LOAD_ETHERTYPE: parse_mac_loader;
+			
+			HOP_MAC_RESULT_ETHERTYPE: accept;
+			AUTH_MAC_RESULT_ETHERTYPE: accept;
 
 			SIP_META_ETHERTYPE: parse_sip_and_meta;
 
@@ -258,8 +261,8 @@ control HalfSipHashIngress(
 		hdr.sip.setInvalid();
 	}
 
-	action do_not_recirc_end_in_eg(bit<8> next_round){
-		to_epic_pipe();
+	action final_recirc_end_in_eg(bit<8> next_round){
+		to_mac_pipe();
 		hdr.sip_meta.curr_round = next_round;
 	}
 
@@ -269,7 +272,7 @@ control HalfSipHashIngress(
 		}
 		actions = {
 			incr_and_recirc;
-			do_not_recirc_end_in_eg;
+			final_recirc_end_in_eg;
 			do_not_recirc_end_in_ig;
 			nop;
 		}
@@ -282,7 +285,7 @@ control HalfSipHashIngress(
 			#define ig_rule_incr_m(i) (i*4): incr_and_recirc(i*4+2);
 			#if (NUM_WORDS%2==0)
 				__LOOP(NUM_WORDS_IG, ig_rule_incr_m)
-				(NUM_WORDS*2): do_not_recirc_end_in_eg(NUM_WORDS*2+2);
+				(NUM_WORDS*2): final_recirc_end_in_eg(NUM_WORDS*2+2);
 			#else
 				__LOOP(NUM_WORDS_IG, ig_rule_incr_m)
 				(NUM_WORDS*2+2): do_not_recirc_end_in_ig();
@@ -472,6 +475,11 @@ control HalfSipHashIngress(
 	}
 
 	apply {
+		if(hdr.ethernet.etherType == HOP_MAC_RESULT_ETHERTYPE || hdr.ethernet.etherType == AUTH_MAC_RESULT_ETHERTYPE){
+			to_epic_pipe();
+			exit;
+		}
+
 		if (!hdr.sip.isValid() && !hdr.mac_load.isValid()) { drop(); exit; }
 
 		// First pass
