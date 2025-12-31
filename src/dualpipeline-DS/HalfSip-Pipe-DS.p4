@@ -747,4 +747,4 @@ Pipeline(
     HalfSipHashEgressParser(),
     HalfSipHashEgress(),
     HalfSipHashEgressDeparser()
-) HalfSipHashPipe;
+) HalfSipHashPipeDS;
