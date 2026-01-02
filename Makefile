@@ -14,6 +14,9 @@ dualpipe:
 	
 	make -C build/dualpipe -j"$(nproc)" -l"$(nproc)" install
 
+ds:
+	make dualpipeds
+
 dualpipeds:
 	rm -rf build/dualpipeds
 	mkdir -p build/dualpipeds

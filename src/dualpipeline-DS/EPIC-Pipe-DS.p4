@@ -22,7 +22,7 @@
 	#define EPIC_REG_SIZE 4096
 #endif
 
-const bit<32> EPIC_TMP_MASK = (bit<32>)(EPIC_REG_SIZE - 1);
+const bit<32> EPIC_PO_MASK = (bit<32>)(EPIC_REG_SIZE - 1);
 
 // Layer 3 definitions
 const bit<8> IPV6_ROUTE = 43;
@@ -103,24 +103,24 @@ struct epic_headers_t {
 struct epic_ig_metadata_t {
 	bit<8> ingress_port;
 
+
 	// EPIC freshness
-    bool cp_hit;
-	bit<32> cp_index;
-	bit<32> tmp_index;
-	bit<64> new_ts;
-	bit<64> prev_ts;
+	bit<32> po_index;
+	bit<32> new_ts32;
+	bit<1> po_ok;
 }
 
 struct epic_eg_metadata_t {
 }
 
-// Registers
-Register<bit<64>, bit<32>>(EPIC_REG_SIZE) reg_po_cp;
-Register<bit<64>, bit<32>>(EPIC_REG_SIZE) reg_po_tmp;
+/*************************************************************************/
+/**************************  S T A T E  **********************************/
+/*************************************************************************/
+// single register array storing last-seen timestamp proxy (32b)
+Register<bit<32>, bit<32>>(EPIC_REG_SIZE) reg_po;
 
 // Hash
-Hash<bit<32>>(HashAlgorithm_t.CRC32) po_hash;
-
+Hash<bit<32>>(HashAlgorithm_t.CRC32) crc32hash;
 
 /*************************************************************************/
 /**************************  P A R S E R  ********************************/
@@ -238,7 +238,6 @@ parser EpicTofinoEgressParser (
             packet.extract(eg_intr_md);
             transition accept;
         }
-
 }
 
 // EpicEgress parser
@@ -258,7 +257,6 @@ parser EpicEgressParser(packet_in packet,
 /*************************************************************************/
 /*****************  I N G R E S S   P R O C E S S I N G  *****************/
 /*************************************************************************/
-
 control EpicIngress(inout epic_headers_t hdr,
                 inout epic_ig_metadata_t ig_md,
                 in ingress_intrinsic_metadata_t ig_intr_md,
@@ -275,9 +273,7 @@ control EpicIngress(inout epic_headers_t hdr,
 
 
 	/*
-	 *
-	 *   EPIC actions
-	 *
+	 *   EPIC  MAC Stages
 	 */
 	action create_hop_authenticator(){
 		hdr.mac_load.setValid();
@@ -302,6 +298,7 @@ control EpicIngress(inout epic_headers_t hdr,
 		hdr.mac_load.setValid();
 			 
 		hdr.mac_load.key_0 = hdr.mac_res.calculated_mac;
+		// One stage key rotation
 		hdr.mac_load.key_1 = hdr.mac_res.calculated_mac[15:0] ++ hdr.mac_res.calculated_mac[31:16];
 
 		hdr.mac_load.m_0 = hdr.epic.src_as_host_hi;
@@ -336,51 +333,53 @@ control EpicIngress(inout epic_headers_t hdr,
 		default_action = nop();
 	}
 
-	// Timestamp freshness enforcement
-	action compute_ts(){
-		ig_md.new_ts = (bit<64>) (hdr.epic.packet_ts_hi ++ hdr.epic.packet_ts_lo) + (bit<64>) hdr.epic.path_ts;
-	}
+    /*
+     * Freshness: compute index + ts32 (single hash call)
+     */
+    action compute_ts32_and_index() {
+        // timestamp proxy: low32(packet_ts + path_ts)
+        ig_md.new_ts32 = hdr.epic.packet_ts_lo + hdr.epic.path_ts;
 
-	action po_hash_to_index(){
-		bit<32> hash = po_hash.get({
-			hdr.epic.src_as_host_hi,
-			hdr.epic.src_as_host_lo,
-			hdr.epic_per_hop.segment_identifier
-		});
+        bit<32> h = crc32hash.get({
+            hdr.epic.src_as_host_hi,
+            hdr.epic.src_as_host_lo,
+			hdr.epic.path_ts,
+            hdr.epic_per_hop.segment_identifier
+        });
 
-		ig_md.tmp_index = hash & EPIC_TMP_MASK;
-	}
+        ig_md.po_index = h & EPIC_PO_MASK;
+    }
 
-	action set_cp_index(bit<32> index){
-		ig_md.cp_index = index;
-		ig_md.cp_hit = true;
-	}
+	/******** RegisterActions ********/
+    RegisterAction<bit<32>, bit<32>, bit<1>>(reg_po) po_check32 = {
+        void apply(inout bit<32> stored, out bit<1> ok) {
+            if (stored == 0) {
+                ok = 1;
+            } else if (ig_md.new_ts32 > stored) {
+                ok = 1;
+            } else {
+                ok = 0;
+            }
+            // stored unchanged
+        }
+    };
 
-	action cp_miss(){
-		ig_md.cp_index = 0;
-		ig_md.cp_hit = false;
-	}
-
-	table epic_ts_freshness {
-		key = {
-			hdr.epic.src_as_host_hi: exact;
-			hdr.epic.src_as_host_lo: exact;
-			hdr.epic_per_hop.segment_identifier: exact;
-		}
-
-		actions = {
-			set_cp_index;
-			cp_miss;
-		}
-
-		default_action = cp_miss();
-		size = 1024;
-	}
+    RegisterAction<bit<32>, bit<32>, bit<1>>(reg_po) po_update32 = {
+        void apply(inout bit<32> stored, out bit<1> ok) {
+            if (stored == 0) {
+                stored = ig_md.new_ts32;
+                ok = 1;
+            } else if (ig_md.new_ts32 > stored) {
+                stored = ig_md.new_ts32;
+                ok = 1;
+            } else {
+                ok = 0;
+            }
+        }
+    };
 
 	/*
-	 *
 	 *   SRv6 actions
-	 *
 	 */
 	#define def_srv6_next(i) action srv6_next_##i(){			\
 		hdr.ipv6.dstAddr = hdr.srh_seg[i].segment_address;  \
@@ -396,43 +395,23 @@ control EpicIngress(inout epic_headers_t hdr,
 			hdr.ipv6.dstAddr: exact;
 			hdr.srh_fixed.segmentsLeft: exact;
 		}
-
-		size = 32;
+		
 		actions = {
 			__LOOP(MAX_SRH, srv6_actname)
 			nop;
 		}
 
 		default_action = nop();
+        size = 32;
 	}
 
     apply {
+        ig_md.po_ok = 1;
 
 		if(hdr.ethernet.etherType == TYPE_IPV6){
-			if(ig_md.ingress_port != hdr.epic_per_hop.ingress_if){
-				drop();
-				exit;
-			}
-
-			if(hdr.srh_fixed.isValid() && hdr.srh_fixed.segmentsLeft > MAX_SRH){
-				drop();
-				exit;
-			}
-
-			// Freshness check
-			compute_ts();
-			po_hash_to_index();
-			
-			epic_ts_freshness.apply();
-
-			if(ig_md.cp_hit) ig_md.prev_ts = reg_po_cp.read(ig_md.cp_index);
-			else ig_md.prev_ts = reg_po_tmp.read(ig_md.cp_index);
-
-			if(ig_md.prev_ts != 0 && ig_md.new_ts <= ig_md.prev_ts){
-				drop();
-				exit;
-			}
-		}
+			if(ig_md.ingress_port != hdr.epic_per_hop.ingress_if){ drop(); exit; }
+			if(hdr.srh_fixed.isValid() && hdr.srh_fixed.segmentsLeft > MAX_SRH){ drop(); exit; }
+        }
 
 		epic_stage.apply();
 
@@ -442,27 +421,11 @@ control EpicIngress(inout epic_headers_t hdr,
 		}
 
 		if(hdr.ethernet.etherType == AUTH_MAC_RESULT_ETHERTYPE){
-			if((bit <24>)(hdr.mac_res.calculated_mac[23:0]) != hdr.epic_per_hop.hop_validation){
-				drop();
-				exit;
-			}
-
-			// Update timestamp
-			compute_ts();
-			po_hash_to_index();
-			epic_ts_freshness.apply();
-			if(ig_md.cp_hit){
-				ig_md.prev_ts = reg_po_cp.read(ig_md.cp_index);
-
-				if (ig_md.prev_ts == 0 || ig_md.new_ts > ig_md.prev_ts) reg_po_cp.write(ig_md.cp_index, ig_md.new_ts);
-
-				reg_po_tmp.write(ig_md.tmp_index, (bit<64>) 0); //clearing temp reg
-			} else {
-				ig_md.prev_ts = reg_po_tmp.read(ig_md.tmp_index);
-
-				if (ig_md.prev_ts == 0 || ig_md.new_ts > ig_md.prev_ts) reg_po_tmp.write(ig_md.tmp_index, ig_md.new_ts);
-			}
-
+			if((bit <24>)(hdr.mac_res.calculated_mac[23:0]) != hdr.epic_per_hop.hop_validation){ drop(); exit; }
+            // update only after successful auth
+            compute_ts32_and_index();
+            ig_md.po_ok = po_update32.execute(ig_md.po_index);
+            if (ig_md.po_ok == 0) { drop(); exit; }
 			// Restore packet and remove per-hop/EPIC header
 			hdr.ethernet.etherType = TYPE_IPV6;
 			hdr.mac_res.setInvalid();
@@ -491,8 +454,7 @@ control EpicEgress(inout epic_headers_t hdr,
 			   in egress_intrinsic_metadata_from_parser_t eg_intr_md_from_prsr,
 			   inout egress_intrinsic_metadata_for_deparser_t eg_intr_md_for_dprsr,
 			   inout egress_intrinsic_metadata_for_output_port_t eg_intr_oport_md) {
-    
-    action nop() {}
+
 
 	apply {
 

@@ -2,7 +2,7 @@
 import struct
 import time
 import os
-from typing import List, Optional, Dict
+from typing import List, Optional
 
 import argparse
 
@@ -138,21 +138,24 @@ def build_epic_packet(marker: bytes,
                       hvf_override: Optional[int] = None,
                       bad_segleft: bool = False,
                       ingress_port_override: Optional[int] = None,
-                      egress_port_override: Optional[int] = None):
+                      egress_port_override: Optional[int] = None,
+                      pkt_ts_override: Optional[int] = None):
     src_as_host = SRC_AS_HOST if src_override is None else src_override
     segid = SEG_ID if segid_override is None else segid_override
 
     ing_p = INGRESS_PORT if ingress_port_override is None else ingress_port_override
     eg_p  = EGRESS_PORT  if egress_port_override is None else egress_port_override
 
+    pkt_ts = PKT_TS if pkt_ts_override is None else pkt_ts_override
+
     hop_mac = compute_hop_mac(PATH_TS, TSEXP, ing_p, eg_p, segid)
-    hvf24 = compute_pkt_mac24(src_as_host, PKT_TS, hop_mac)
+    hvf24 = compute_pkt_mac24(src_as_host, pkt_ts, hop_mac)
 
     if hvf_override is not None:
         hvf24 = hvf_override & 0xFFFFFF
 
     epic_bytes = pack_epic_payload(
-        src_as_host, PKT_TS, PATH_TS,
+        src_as_host, pkt_ts, PATH_TS,
         PER_HOP_COUNT, EPIC_NEXT_HDR,
         TSEXP, ing_p, eg_p, segid,
         hvf24
@@ -195,7 +198,7 @@ def run():
         drop_sniff = [EGRESS_IFACE]
 
 
-    total_test = 7
+    total_test = 9
     valid_tests = 0
 
     # 1) VALID
@@ -208,11 +211,12 @@ def run():
 
     try:
         send_and_expect(pkt, m, True, good_sniff, "VALID", "01_valid")
-        print("✅ [PASS] VALID forwards\n")
+        print("✅ [PASS] VALID forwards")
         valid_tests += 1
     except AssertionError as e:
-        if(PRINT_ERRORS): print("Error:\n" + '`'*10 + '\n' + e + '\n' + '`'*10 + '\n')
-        print("❌ [FAIL] VALID did not forward as expected\n")
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+        print("❌ [FAIL] VALID did not forward as expected")
 
     # 2) BAD_HVF (flip 1 bit)
     m = b"T_BAD_HVF_" + struct.pack("!I", (int(time.time()) + 1) & 0xFFFFFFFF)
@@ -220,11 +224,12 @@ def run():
 
     try:
         send_and_expect(pkt2, m, False, drop_sniff, "BAD_HVF", "02_bad_hvf")
-        print("✅ [PASS] BAD_HVF drops\n")
+        print("✅ [PASS] BAD_HVF drops")
         valid_tests += 1
     except AssertionError as e:
-        if(PRINT_ERRORS): print("Error:\n" + '`'*10 + '\n' + e + '\n' + '`'*10 + '\n')
-        print("❌ [FAIL] BAD_HVF did not drop as expected\n")   
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+        print("❌ [FAIL] BAD_HVF did not drop as expected")
 
     # 3) BAD_SRC but keep hvf
     m = b"T_BAD_SRC_" + struct.pack("!I", (int(time.time()) + 2) & 0xFFFFFFFF)
@@ -234,8 +239,9 @@ def run():
         print("✅ [PASS] BAD_SRC drops")
         valid_tests += 1
     except AssertionError as e:
-        if(PRINT_ERRORS): print("Error:\n" + '`'*10 + '\n' + e + '\n' + '`'*10 + '\n')
-        print("❌ [FAIL] BAD_SRC did not drop as expected")  
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+        print("❌ [FAIL] BAD_SRC did not drop as expected")
 
     # 4) BAD_SEGID but keep hvf
     m = b"T_BAD_SEGID_" + struct.pack("!I", (int(time.time()) + 3) & 0xFFFFFFFF)
@@ -245,7 +251,8 @@ def run():
         print("✅ [PASS] BAD_SEGID drops")
         valid_tests += 1
     except AssertionError as e:
-        if(PRINT_ERRORS): print("Error:\n" + '`'*10 + '\n' + e + '\n' + '`'*10 + '\n')
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
         print("❌ [FAIL] BAD_SEGID did not drop as expected")
     
     # 5) BAD_SEGLEFT
@@ -256,27 +263,123 @@ def run():
         print("✅ [PASS] BAD_SEGLEFT drops")
         valid_tests += 1
     except AssertionError as e:
-        if(PRINT_ERRORS): print("Error:\n" + '`'*10 + '\n' + e + '\n' + '`'*10 + '\n')
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
         print("❌ [FAIL] BAD_SEGLEFT did not drop as expected")
 
     # 6) BAD_ING_PORT: EPIC says ingress_if=1 but we inject on port 0
-    #    This should be dropped if your P4 enforces:
-    #      if(ig_intr_md.ingress_port != hdr.epic_per_hop.ingress_if) drop;
     m = b"T_BAD_INGPORT_" + struct.pack("!I", (int(time.time()) + 5) & 0xFFFFFFFF)
     pkt6, _, _ = build_epic_packet(marker=m, ingress_port_override=1, egress_port_override=EGRESS_PORT)
     try:
         send_and_expect(pkt6, m, False, drop_sniff, "BAD_ING_PORT", "06_bad_ing_port")
-        print("✅ [PASS] BAD_ING_PORT drops\n")
+        print("✅ [PASS] BAD_ING_PORT drops")
         valid_tests += 1
     except AssertionError as e:
-        if(PRINT_ERRORS): print("Error:\n" + '`'*10 + '\n' + e + '\n' + '`'*10 + '\n')
-        print("❌ [FAIL] BAD_ING_PORT did not drop as expected\n")
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+        print("❌ [FAIL] BAD_ING_PORT did not drop as expected")
+    
+    #7) GOOD_TS: two packets, strictly increasing ts -> both forward
+    try:
+        base = (int(time.time()) & 0xFFFFFFFF)
 
-    #7) BAD_DUP: Send two messages, the second needs to be dropped
-    # TODO
+        ts1 = PKT_TS + 0x10
+        m7a = b"T_GOOD_TS_A_" + struct.pack("!I", base)
+        pkt7a, _, _ = build_epic_packet(marker=m7a, pkt_ts_override=ts1)
+        send_and_expect(pkt7a, m7a, True, good_sniff, "GOOD_TS_A", "07_good_ts_a")
 
-    if(total_test == valid_tests): print("---- ALL TESTS PASSED ✅ ----")
-    else: print(str(total_test - valid_tests) + " TESTS FAILED ❌")
+        ts2 = PKT_TS + 0x11  # strictly increasing
+        m7b = b"T_GOOD_TS_B_" + struct.pack("!I", base + 1)
+        pkt7b, _, _ = build_epic_packet(marker=m7b, pkt_ts_override=ts2)
+        send_and_expect(pkt7b, m7b, True, good_sniff, "GOOD_TS_B", "07_good_ts_b")
+
+        print("✅ [PASS] GOOD_TS monotonic accepts increasing timestamps (2/2)")
+        valid_tests += 1
+    except AssertionError as e:
+        if PRINT_ERRORS:
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+        print("❌ [FAIL] GOOD_TS monotonic test failed")
+
+    #8) DUP/ORDERING: 5 packets, show both kinds of drop (smaller and equal)
+    #    1st: forward (ts=t1)
+    #    2nd: drop    (ts<t1)
+    #    3rd: forward (ts>t1)
+    #    4th: drop    (ts==t3)
+    #    5th: drop    (ts<t3)
+    try:
+        base = (int(time.time()) & 0xFFFFFFFF) + 100
+
+        t1 = PKT_TS + 0x200
+        m8_1 = b"T_DUP_1_" + struct.pack("!I", base)
+        p8_1, _, _ = build_epic_packet(marker=m8_1, pkt_ts_override=t1)
+        send_and_expect(p8_1, m8_1, True, good_sniff, "DUP_1", "08_dup_1")
+        print("Packet 1 forwarded ...", end='\r')
+
+        t2 = PKT_TS + 0x100  # smaller than t1 -> drop
+        m8_2 = b"T_DUP_2_" + struct.pack("!I", base + 1)
+        p8_2, _, _ = build_epic_packet(marker=m8_2, pkt_ts_override=t2)
+        send_and_expect(p8_2, m8_2, False, drop_sniff, "DUP_2_SMALLER", "08_dup_2_smaller")
+        print("Packet 2 dropped (as expected) ...    ", end='\r')
+
+        t3 = PKT_TS + 0x300  # greater -> forward
+        m8_3 = b"T_DUP_3_" + struct.pack("!I", base + 2)
+        p8_3, _, _ = build_epic_packet(marker=m8_3, pkt_ts_override=t3)
+        send_and_expect(p8_3, m8_3, True, good_sniff, "DUP_3_GREATER", "08_dup_3_greater")
+        print("Packet 3 forwarded (as expected) ...  ", end='\r')
+
+        t4 = t3  # equal -> drop
+        m8_4 = b"T_DUP_4_" + struct.pack("!I", base + 3)
+        p8_4, _, _ = build_epic_packet(marker=m8_4, pkt_ts_override=t4)
+        send_and_expect(p8_4, m8_4, False, drop_sniff, "DUP_4_EQUAL", "08_dup_4_equal")
+        print("Packet 4 dropped (as expected) ...    ", end='\r')
+
+        t5 = PKT_TS + 0x250  # smaller than latest (t3) -> drop
+        m8_5 = b"T_DUP_5_" + struct.pack("!I", base + 4)
+        p8_5, _, _ = build_epic_packet(marker=m8_5, pkt_ts_override=t5)
+        send_and_expect(p8_5, m8_5, False, drop_sniff, "DUP_5_SMALLER_AFTER_UPDATE", "08_dup_5_smaller_after")
+        print("Packet 5 dropped (as expected) ...    ", end='\r')
+
+        print("✅ [PASS] DUP test: smaller+equal timestamps drop, greater passes (5-step)")
+        valid_tests += 1
+    except AssertionError as e:
+        if PRINT_ERRORS:
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+        print("❌ [FAIL] DUP 5-step test failed")
+
+
+
+    #9) DIFF_PO: 2 packets, origin2 != origin1
+    try:
+        base = (int(time.time()) & 0xFFFFFFFF) + 200
+
+        # Origin #1
+        t9_1 = PKT_TS + 0x400
+        m9_1 = b"T_PO1_" + struct.pack("!I", base)
+        p9_1, _, _ = build_epic_packet(marker=m9_1, pkt_ts_override=t9_1)
+        send_and_expect(p9_1, m9_1, True, good_sniff, "PO1", "09_po1")
+
+        # Origin #2 (different src and segid) with smaller timestamp
+        t9_2 = PKT_TS + 0x010  # smaller than t9_1
+        src2 = SRC_AS_HOST ^ 0x0101010101010101
+        seg2 = SEG_ID ^ 0xBEEF
+        m9_2 = b"T_PO2_" + struct.pack("!I", base + 1)
+        p9_2, _, _ = build_epic_packet(
+            marker=m9_2,
+            pkt_ts_override=t9_2,
+            src_override=src2,
+            segid_override=seg2
+        )
+        send_and_expect(p9_2, m9_2, True, good_sniff, "PO2_SMALLER_TS_DIFFERENT_ORIGIN", "09_po2_smaller_ts")
+
+        print("✅ [PASS] Different packet-origin allows smaller timestamp (2-step)")
+        valid_tests += 1
+    except AssertionError as e:
+        if PRINT_ERRORS:
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+        print("❌ [FAIL] Different packet-origin test failed! Retry (hash collision chance)")
+
+    if total_test == valid_tests: print("---- ALL TESTS PASSED ✅ ----")
+    else: print(f"{total_test - valid_tests} TESTS FAILED ❌")
 
     if WRITE_PCAPS:
         print(f"PCAPs written under: {os.path.abspath(PCAP_DIR)}")
@@ -298,7 +401,6 @@ if __name__ == "__main__":
     parser.add_argument("--path-ts", type=lambda x: int(x, 0), default=0x22222222, help="Path Timestamp (32-bit hex)")
     parser.add_argument("--seg-id", type=lambda x: int(x, 0), default=0x1234, help="Segment ID (16-bit hex)")
     parser.add_argument("--sid-list", type=str, nargs="+", default=["2001:db8:0:1::1", "2001:db8:0:2::1"], help="List of IPv6 SIDs")
-    parser.add_argument("--show-errors", type=bool, default=["2001:db8:0:1::1", "2001:db8:0:2::1"], help="List of IPv6 SIDs")
     parser.add_argument("--show-errors", action="store_true", dest="show_errors", help="Print error description if any occur")
     
     # HalfSipHash Keys

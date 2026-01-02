@@ -208,11 +208,12 @@ def run():
 
     try:
         send_and_expect(pkt, m, True, good_sniff, "VALID", "01_valid")
-        print("✅ [PASS] VALID forwards\n")
+        print("✅ [PASS] VALID forwards")
         valid_tests += 1
     except AssertionError as e:
-        if(PRINT_ERRORS): print("Error:\n" + '`'*10 + '\n' + e + '\n' + '`'*10 + '\n')
-        print("❌ [FAIL] VALID did not forward as expected\n")
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+        print("❌ [FAIL] VALID did not forward as expected")
 
     # 2) BAD_HVF (flip 1 bit)
     m = b"T_BAD_HVF_" + struct.pack("!I", (int(time.time()) + 1) & 0xFFFFFFFF)
@@ -220,11 +221,12 @@ def run():
 
     try:
         send_and_expect(pkt2, m, False, drop_sniff, "BAD_HVF", "02_bad_hvf")
-        print("✅ [PASS] BAD_HVF drops\n")
+        print("✅ [PASS] BAD_HVF drops")
         valid_tests += 1
     except AssertionError as e:
-        if(PRINT_ERRORS): print("Error:\n" + '`'*10 + '\n' + e + '\n' + '`'*10 + '\n')
-        print("❌ [FAIL] BAD_HVF did not drop as expected\n")   
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+        print("❌ [FAIL] BAD_HVF did not drop as expected")   
 
     # 3) BAD_SRC but keep hvf
     m = b"T_BAD_SRC_" + struct.pack("!I", (int(time.time()) + 2) & 0xFFFFFFFF)
@@ -234,7 +236,8 @@ def run():
         print("✅ [PASS] BAD_SRC drops")
         valid_tests += 1
     except AssertionError as e:
-        if(PRINT_ERRORS): print("Error:\n" + '`'*10 + '\n' + e + '\n' + '`'*10 + '\n')
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
         print("❌ [FAIL] BAD_SRC did not drop as expected")  
 
     # 4) BAD_SEGID but keep hvf
@@ -245,7 +248,8 @@ def run():
         print("✅ [PASS] BAD_SEGID drops")
         valid_tests += 1
     except AssertionError as e:
-        if(PRINT_ERRORS): print("Error:\n" + '`'*10 + '\n' + e + '\n' + '`'*10 + '\n')
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
         print("❌ [FAIL] BAD_SEGID did not drop as expected")
     
     # 5) BAD_SEGLEFT
@@ -256,7 +260,8 @@ def run():
         print("✅ [PASS] BAD_SEGLEFT drops")
         valid_tests += 1
     except AssertionError as e:
-        if(PRINT_ERRORS): print("Error:\n" + '`'*10 + '\n' + e + '\n' + '`'*10 + '\n')
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
         print("❌ [FAIL] BAD_SEGLEFT did not drop as expected")
 
     # 6) BAD_ING_PORT: EPIC says ingress_if=1 but we inject on port 0
@@ -266,11 +271,12 @@ def run():
     pkt6, _, _ = build_epic_packet(marker=m, ingress_port_override=1, egress_port_override=EGRESS_PORT)
     try:
         send_and_expect(pkt6, m, False, drop_sniff, "BAD_ING_PORT", "06_bad_ing_port")
-        print("✅ [PASS] BAD_ING_PORT drops\n")
+        print("✅ [PASS] BAD_ING_PORT drops")
         valid_tests += 1
     except AssertionError as e:
-        if(PRINT_ERRORS): print("Error:\n" + '`'*10 + '\n' + e + '\n' + '`'*10 + '\n')
-        print("❌ [FAIL] BAD_ING_PORT did not drop as expected\n")
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+        print("❌ [FAIL] BAD_ING_PORT did not drop as expected")
 
 
     if(total_test == valid_tests): print("---- ALL TESTS PASSED ✅ ----")
@@ -296,7 +302,6 @@ if __name__ == "__main__":
     parser.add_argument("--path-ts", type=lambda x: int(x, 0), default=0x22222222, help="Path Timestamp (32-bit hex)")
     parser.add_argument("--seg-id", type=lambda x: int(x, 0), default=0x1234, help="Segment ID (16-bit hex)")
     parser.add_argument("--sid-list", type=str, nargs="+", default=["2001:db8:0:1::1", "2001:db8:0:2::1"], help="List of IPv6 SIDs")
-    parser.add_argument("--show-errors", type=bool, default=["2001:db8:0:1::1", "2001:db8:0:2::1"], help="List of IPv6 SIDs")
     parser.add_argument("--show-errors", action="store_true", dest="show_errors", help="Print error description if any occur")
     
     # HalfSipHash Keys
