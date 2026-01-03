@@ -6,14 +6,14 @@ from typing import List, Optional
 
 import argparse
 
+# Packet imports
 from scapy.layers.l2 import Ether
-from scapy.layers.inet6 import IPv6, IPv6ExtHdrSegmentRouting
+from scapy.layers.inet6 import IPv6
 from scapy.packet import Raw
 from scapy.sendrecv import sendp, AsyncSniffer
 from scapy.utils import wrpcap
 
-# halfsiphash import based on Princeton paper's implementation
-from include.halfsiphash import halfsiphash_2_4_32, swap16_halves, u24
+from include.PacketBuilder import EpicBuilder, SRHBuilder
 
 # tofino ports
 from include.tofinoports import port_to_iface, all_model_port_ifaces
@@ -32,10 +32,10 @@ PATH_TS     = 0x22222222
 PER_HOP_COUNT = 1
 EPIC_NEXT_HDR = 59
 TSEXP     = 0x01
-SEG_ID    = 0x1234
 SID_LIST = ["2001:db8:0:1::1", "2001:db8:0:2::1"]
-SRH_NH  = 43
-EPIC_NH = 253
+IPV6_NEXT_HEADER  = 43
+SRH_NEXT_HEADER = 253
+SEG_ID    = 0x1234
 SIP_KEY_0 = 0x33323130
 SIP_KEY_1 = 0x42413938
 PCAP_DIR = "../tmp/"
@@ -46,51 +46,6 @@ PRINT_ERRORS = False
 # Derived at runtime
 INGRESS_IFACE = ""
 EGRESS_IFACE  = ""
-
-
-# -----------------------------
-# EPIC L1 MAC chain (ports are Tofino port IDs)
-# -----------------------------
-def compute_hop_mac(path_ts: int, tsexp: int, ing_port: int, eg_port: int, segid: int) -> int:
-    m0 = path_ts & 0xFFFFFFFF
-    m1 = ((ing_port & 0xFF) << 24) | ((eg_port & 0xFF) << 16) | (segid & 0xFFFF)
-    m2 = ((tsexp & 0xFF) << 24)
-    m3 = 0
-    return halfsiphash_2_4_32(SIP_KEY_0, SIP_KEY_1, [m0, m1, m2, m3])
-
-
-def compute_pkt_mac24(src_as_host: int, pkt_ts: int, hop_mac: int) -> int:
-    src_hi = (src_as_host >> 32) & 0xFFFFFFFF
-    src_lo = src_as_host & 0xFFFFFFFF
-    ts_hi  = (pkt_ts >> 32) & 0xFFFFFFFF
-    ts_lo  = pkt_ts & 0xFFFFFFFF
-
-    k0 = hop_mac & 0xFFFFFFFF
-    k1 = swap16_halves(hop_mac) & 0xFFFFFFFF
-
-    mac32 = halfsiphash_2_4_32(k0, k1, [src_hi, src_lo, ts_hi, ts_lo])
-    return u24(mac32)
-
-
-def pack_epic_payload(src_as_host: int, pkt_ts: int, path_ts: int,
-                      per_hop_count: int, epic_next_hdr: int,
-                      tsexp: int, ing_port: int, eg_port: int, segid: int,
-                      hop_validation24: int) -> bytes:
-    epic_h = struct.pack("!QQIBB",
-                         src_as_host & 0xFFFFFFFFFFFFFFFF,
-                         pkt_ts & 0xFFFFFFFFFFFFFFFF,
-                         path_ts & 0xFFFFFFFF,
-                         per_hop_count & 0xFF,
-                         epic_next_hdr & 0xFF)
-
-    per_hop = struct.pack("!BBBH",
-                          tsexp & 0xFF,
-                          ing_port & 0xFF,
-                          eg_port & 0xFF,
-                          segid & 0xFFFF)
-
-    per_hop += (hop_validation24 & 0xFFFFFF).to_bytes(3, "big")
-    return epic_h + per_hop
 
 
 # -----------------------------
@@ -132,65 +87,13 @@ def send_and_expect(pkt, marker: bytes, expect_forward: bool,
         raise AssertionError(f"[{label}] Expected DROP, but marker seen on {sniff_ifaces} (count={len(pkts)})")
 
 
-def build_epic_packet(marker: bytes,
-                      src_override: Optional[int] = None,
-                      segid_override: Optional[int] = None,
-                      hvf_override: Optional[int] = None,
-                      bad_segleft: bool = False,
-                      ingress_port_override: Optional[int] = None,
-                      egress_port_override: Optional[int] = None,
-                      pkt_ts_override: Optional[int] = None):
-    src_as_host = SRC_AS_HOST if src_override is None else src_override
-    segid = SEG_ID if segid_override is None else segid_override
-
-    ing_p = INGRESS_PORT if ingress_port_override is None else ingress_port_override
-    eg_p  = EGRESS_PORT  if egress_port_override is None else egress_port_override
-
-    pkt_ts = PKT_TS if pkt_ts_override is None else pkt_ts_override
-
-    hop_mac = compute_hop_mac(PATH_TS, TSEXP, ing_p, eg_p, segid)
-    hvf24 = compute_pkt_mac24(src_as_host, pkt_ts, hop_mac)
-
-    if hvf_override is not None:
-        hvf24 = hvf_override & 0xFFFFFF
-
-    epic_bytes = pack_epic_payload(
-        src_as_host, pkt_ts, PATH_TS,
-        PER_HOP_COUNT, EPIC_NEXT_HDR,
-        TSEXP, ing_p, eg_p, segid,
-        hvf24
-    )
-
-    segleft = len(SID_LIST) - 1
-    if bad_segleft:
-        segleft = len(SID_LIST) + 3
-
-    dst = SID_LIST[-1] if segleft >= len(SID_LIST) else SID_LIST[segleft]
-    ipv6 = IPv6(src="2001:db8::100", dst=dst, nh=SRH_NH)
-
-    srh = IPv6ExtHdrSegmentRouting(nh=EPIC_NH)
-    srh.addresses = SID_LIST
-    srh.lastentry = len(SID_LIST) - 1
-    srh.segleft   = segleft
-
-    pkt = (
-        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
-        ipv6 /
-        srh /
-        Raw(load=epic_bytes) /
-        Raw(load=marker)
-    )
-    return pkt, hop_mac, hvf24
-
-
 # -----------------------------
 # Tests
 # -----------------------------
-def run():
+def run_tests():
     print(f"Injecting on port {INGRESS_PORT} ({INGRESS_IFACE}), expecting forward on port {EGRESS_PORT} ({EGRESS_IFACE})\n")
 
     good_sniff = [EGRESS_IFACE]
-
     if STRICT_DROP:
         candidates = all_model_port_ifaces(max_port=16, extra_ports=[64])
         drop_sniff = [i for i in candidates if i != INGRESS_IFACE]
@@ -198,56 +101,118 @@ def run():
         drop_sniff = [EGRESS_IFACE]
 
 
-    total_test = 9
+    epic = EpicBuilder(SIP_KEY_0, SIP_KEY_1, SRC_AS_HOST, SEG_ID, PKT_TS, PATH_TS, PER_HOP_COUNT, EPIC_NEXT_HDR, TSEXP, INGRESS_PORT, EGRESS_PORT)
+    srh = SRHBuilder(SID_LIST, SRH_NEXT_HEADER)
+    ipv6 = IPv6(src="2001:db8::100", dst=srh.sid_list[srh.last_entry], nh=IPV6_NEXT_HEADER)
+
+    total_test = 11
     valid_tests = 0
 
     # 1) VALID
-    m = b"T_VALID_" + struct.pack("!I", int(time.time()) & 0xFFFFFFFF)
-    pkt, hop_mac, hvf24 = build_epic_packet(marker=m)
-
-    print(f"hop_mac    = 0x{hop_mac:08x}")
-    print(f"swap16(k1) = 0x{swap16_halves(hop_mac):08x}")
-    print(f"hvf24      = 0x{hvf24:06x}\n")
+    marker = b"T_VALID_" + struct.pack("!I", int(time.time()) & 0xFFFFFFFF)
+    epic_pkt = epic.build_epic()
+    srh_pkt = srh.build_srh()
+    pkt = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic_pkt) /
+        Raw(load=marker)
+    )
 
     try:
-        send_and_expect(pkt, m, True, good_sniff, "VALID", "01_valid")
-        print("✅ [PASS] VALID forwards")
+        send_and_expect(pkt, marker, True, good_sniff, "VALID_1_EPIC", "01_valid")
+        print("✅ [PASS] VALID_1_EPIC forwards")
         valid_tests += 1
     except AssertionError as e:
         if(PRINT_ERRORS):
             print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
-        print("❌ [FAIL] VALID did not forward as expected")
+        print("❌ [FAIL] VALID_1_EPIC did not forward as expected")
+    
+    # 2) VALID multiple per_hop
+    epic.per_hop_count = 4
+    marker2 = b"T_VALID_" + struct.pack("!I", int(time.time()) & 0xFFFFFFFF)
+    epic.pkt_ts = epic.pkt_ts + 1; epic_pkt = epic.build_epic()
+    srh_pkt = srh.build_srh()
+    pkt2 = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic_pkt) /
+        Raw(load=marker2)
+    )
 
-    # 2) BAD_HVF (flip 1 bit)
-    m = b"T_BAD_HVF_" + struct.pack("!I", (int(time.time()) + 1) & 0xFFFFFFFF)
-    pkt2, _, _ = build_epic_packet(marker=m, hvf_override=(hvf24 ^ 0x1))
+    # Restore
+    epic.per_hop_count = PER_HOP_COUNT
 
     try:
-        send_and_expect(pkt2, m, False, drop_sniff, "BAD_HVF", "02_bad_hvf")
+        send_and_expect(pkt2, marker2, True, good_sniff, "VALID_4_EPIC", "02_valid")
+        print("✅ [PASS] VALID_4_EPIC forwards")
+        valid_tests += 1
+    except AssertionError as e:
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+        print("❌ [FAIL] VALID_4_EPIC did not forward as expected")
+
+
+    # 3) BAD_HVF (flip 1 bit)
+    marker3 = b"T_BAD_HVF_" + struct.pack("!I", (int(time.time()) + 1) & 0xFFFFFFFF)
+
+    hvf24 = epic.get_pkt_mac()
+    epic.pkt_ts = epic.pkt_ts + 1; epic_pkt = epic.build_epic(hvf_override=(hvf24 ^ 0x1))
+    srh_pkt = srh.build_srh()
+    pkt3 = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic_pkt) /
+        Raw(load=marker3)
+    )
+
+    try:
+        send_and_expect(pkt3, marker3, False, drop_sniff, "BAD_HVF", "03_bad_hvf")
         print("✅ [PASS] BAD_HVF drops")
         valid_tests += 1
     except AssertionError as e:
         if(PRINT_ERRORS):
             print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
-        print("❌ [FAIL] BAD_HVF did not drop as expected")
+        print("❌ [FAIL] BAD_HVF did not drop as expected")   
 
-    # 3) BAD_SRC but keep hvf
-    m = b"T_BAD_SRC_" + struct.pack("!I", (int(time.time()) + 2) & 0xFFFFFFFF)
-    pkt3, _, _ = build_epic_packet(marker=m, src_override=(SRC_AS_HOST ^ 0x1), hvf_override=hvf24)
+    # 4) BAD_SRC but keep hvf
+    marker4 = b"T_BAD_SRC_" + struct.pack("!I", (int(time.time()) + 2) & 0xFFFFFFFF)
+    epic.pkt_ts = epic.pkt_ts + 1; epic_pkt = epic.build_epic(src_override=(SRC_AS_HOST ^ 0x1))
+    srh_pkt = srh.build_srh()
+    pkt4 = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic_pkt) /
+        Raw(load=marker4)
+    )
+
     try:
-        send_and_expect(pkt3, m, False, drop_sniff, "BAD_SRC", "03_bad_src")
+        send_and_expect(pkt4, marker4, False, drop_sniff, "BAD_SRC", "04_bad_src")
         print("✅ [PASS] BAD_SRC drops")
         valid_tests += 1
     except AssertionError as e:
         if(PRINT_ERRORS):
             print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
-        print("❌ [FAIL] BAD_SRC did not drop as expected")
+        print("❌ [FAIL] BAD_SRC did not drop as expected")  
 
-    # 4) BAD_SEGID but keep hvf
-    m = b"T_BAD_SEGID_" + struct.pack("!I", (int(time.time()) + 3) & 0xFFFFFFFF)
-    pkt4, _, _ = build_epic_packet(marker=m, segid_override=(SEG_ID ^ 0x1), hvf_override=hvf24)
+    # 5) BAD_SEGID but keep hvf
+    marker5 = b"T_BAD_SEGID_" + struct.pack("!I", (int(time.time()) + 3) & 0xFFFFFFFF)
+    epic.pkt_ts = epic.pkt_ts + 1; epic_pkt = epic.build_epic(segid_override=(SEG_ID ^ 0x1))
+    srh_pkt = srh.build_srh()
+    pkt5 = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic_pkt) /
+        Raw(load=marker5)
+    )
+
     try:
-        send_and_expect(pkt4, m, False, drop_sniff, "BAD_SEGID", "04_bad_segid")
+        send_and_expect(pkt5, marker5, False, drop_sniff, "BAD_SEGID", "05_bad_segid")
         print("✅ [PASS] BAD_SEGID drops")
         valid_tests += 1
     except AssertionError as e:
@@ -255,11 +220,20 @@ def run():
             print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
         print("❌ [FAIL] BAD_SEGID did not drop as expected")
     
-    # 5) BAD_SEGLEFT
-    m = b"T_BAD_SEGLEFT_" + struct.pack("!I", (int(time.time()) + 4) & 0xFFFFFFFF)
-    pkt5, _, _ = build_epic_packet(marker=m, bad_segleft=True)
+    # 6) BAD_SEGLEFT
+    marker6 = b"T_BAD_SEGLEFT_" + struct.pack("!I", (int(time.time()) + 4) & 0xFFFFFFFF)
+    epic.pkt_ts = epic.pkt_ts + 1; epic_pkt = epic.build_epic()
+    srh_pkt = srh.build_srh(segleft_override=True)
+    pkt6 = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic_pkt) /
+        Raw(load=marker6)
+    )
+
     try:
-        send_and_expect(pkt5, m, False, drop_sniff, "BAD_SEGLEFT", "05_bad_segleft")
+        send_and_expect(pkt6, marker6, False, drop_sniff, "BAD_SEGLEFT", "06_bad_segleft")
         print("✅ [PASS] BAD_SEGLEFT drops")
         valid_tests += 1
     except AssertionError as e:
@@ -267,11 +241,22 @@ def run():
             print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
         print("❌ [FAIL] BAD_SEGLEFT did not drop as expected")
 
-    # 6) BAD_ING_PORT: EPIC says ingress_if=1 but we inject on port 0
-    m = b"T_BAD_INGPORT_" + struct.pack("!I", (int(time.time()) + 5) & 0xFFFFFFFF)
-    pkt6, _, _ = build_epic_packet(marker=m, ingress_port_override=1, egress_port_override=EGRESS_PORT)
+    # 7) BAD_ING_PORT: EPIC says ingress_if=1 but we inject on port 0
+    #    This should be dropped if your P4 enforces:
+    #      if(ig_intr_md.ingress_port != hdr.epic_per_hop.ingress_if) drop;
+    marker7 = b"T_BAD_INGPORT_" + struct.pack("!I", (int(time.time()) + 5) & 0xFFFFFFFF)
+    epic.pkt_ts = epic.pkt_ts + 1; epic_pkt = epic.build_epic(ingress_port_override=1)
+    srh_pkt = srh.build_srh()
+    pkt7 = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic_pkt) /
+        Raw(load=marker7)
+    )
+
     try:
-        send_and_expect(pkt6, m, False, drop_sniff, "BAD_ING_PORT", "06_bad_ing_port")
+        send_and_expect(pkt7, marker7, False, drop_sniff, "BAD_ING_PORT", "07_bad_ing_port")
         print("✅ [PASS] BAD_ING_PORT drops")
         valid_tests += 1
     except AssertionError as e:
@@ -279,64 +264,142 @@ def run():
             print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
         print("❌ [FAIL] BAD_ING_PORT did not drop as expected")
     
-    #7) GOOD_TS: two packets, strictly increasing ts -> both forward
+    # 8) BAD_EG_PORT: EPIC says egress_if=4 but the hvf was calculated differently.
+    marker8 = b"T_BAD_EGPORT_" + struct.pack("!I", (int(time.time()) + 5) & 0xFFFFFFFF)
+    epic.pkt_ts = epic.pkt_ts + 1; epic_pkt = epic.build_epic(egress_port_override=4)
+    srh_pkt = srh.build_srh()
+    pkt8 = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic_pkt) /
+        Raw(load=marker8)
+    )
+
     try:
-        base = (int(time.time()) & 0xFFFFFFFF)
+        send_and_expect(pkt8, marker8, False, drop_sniff, "BAD_EG_PORT", "08_bad_eg_port")
+        print("✅ [PASS] BAD_EG_PORT drops")
+        valid_tests += 1
+    except AssertionError as e:
+        if(PRINT_ERRORS):
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+        print("❌ [FAIL] BAD_EG_PORT did not drop as expected")
 
-        ts1 = PKT_TS + 0x10
-        m7a = b"T_GOOD_TS_A_" + struct.pack("!I", base)
-        pkt7a, _, _ = build_epic_packet(marker=m7a, pkt_ts_override=ts1)
-        send_and_expect(pkt7a, m7a, True, good_sniff, "GOOD_TS_A", "07_good_ts_a")
 
-        ts2 = PKT_TS + 0x11  # strictly increasing
-        m7b = b"T_GOOD_TS_B_" + struct.pack("!I", base + 1)
-        pkt7b, _, _ = build_epic_packet(marker=m7b, pkt_ts_override=ts2)
-        send_and_expect(pkt7b, m7b, True, good_sniff, "GOOD_TS_B", "07_good_ts_b")
+    #9) HVF Reuse: 2 packets, same HVF but ts2 > ts1
+    base = (int(time.time()) & 0xFFFFFFFF) + 100
+    marker9_1 = b"T_HVF_REUSE_1_" + struct.pack("!I", base + 4)
+    epic.pkt_ts = epic.pkt_ts + 1; epic_pkt = epic.build_epic()
 
-        print("✅ [PASS] GOOD_TS monotonic accepts increasing timestamps (2/2)")
+    pkt9_1_hvf = epic.get_pkt_mac()
+    pkt9_1 = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic_pkt) /
+        Raw(load=marker9_1)
+    )
+
+    marker9_2 = b"T_HVF_REUSE_2_" + struct.pack("!I", base + 4)
+    epic.pkt_ts = epic.pkt_ts + 1; epic_pkt = epic.build_epic(hvf_override=pkt9_1_hvf)
+    pkt9_2 = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic_pkt) /
+        Raw(load=marker9_1)
+    )
+
+    try:
+        send_and_expect(pkt9_1, marker9_1, True, good_sniff, "HVF_REUSE_1", "09_HVF_1_PASS")
+        print("Packet 1 forwarded (as expected) ...  ", end='\r')
+
+
+        send_and_expect(pkt9_2, marker9_2, False, drop_sniff, "HVF_REUSE_2", "09_HVF_1_DROP")
+        print("Packet 2 dropped (as expected) ...    ", end='\r')
+
+        print("✅ [PASS] REUSE test: reused HVF with different timestamp dropped")
         valid_tests += 1
     except AssertionError as e:
         if PRINT_ERRORS:
             print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
-        print("❌ [FAIL] GOOD_TS monotonic test failed")
+        print("❌ [FAIL] REUSE test: reused HVF with different timestamp forwarded")
 
-    #8) DUP/ORDERING: 5 packets, show both kinds of drop (smaller and equal)
+    
+
+    #10) DUP/ORDERING: 5 packets, show both kinds of drop (smaller and equal)
     #    1st: forward (ts=t1)
     #    2nd: drop    (ts<t1)
     #    3rd: forward (ts>t1)
     #    4th: drop    (ts==t3)
     #    5th: drop    (ts<t3)
+    base = (int(time.time()) & 0xFFFFFFFF) + 100
+    srh_pkt = srh.build_srh()
+    
     try:
-        base = (int(time.time()) & 0xFFFFFFFF) + 100
+        marker10_1 = b"T_DUP_1_" + struct.pack("!I", base)
+        epic.pkt_ts = epic.pkt_ts + 10; epic_pkt = epic.build_epic()
+        pkt10_1 = (
+            Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+            ipv6 /
+            srh_pkt /
+            Raw(load=epic_pkt) /
+            Raw(load=marker10_1)
+        )
 
-        t1 = PKT_TS + 0x200
-        m8_1 = b"T_DUP_1_" + struct.pack("!I", base)
-        p8_1, _, _ = build_epic_packet(marker=m8_1, pkt_ts_override=t1)
-        send_and_expect(p8_1, m8_1, True, good_sniff, "DUP_1", "08_dup_1")
+        send_and_expect(pkt10_1, marker10_1, True, good_sniff, "DUP_1", "10_dup_1")
         print("Packet 1 forwarded ...", end='\r')
 
-        t2 = PKT_TS + 0x100  # smaller than t1 -> drop
-        m8_2 = b"T_DUP_2_" + struct.pack("!I", base + 1)
-        p8_2, _, _ = build_epic_packet(marker=m8_2, pkt_ts_override=t2)
-        send_and_expect(p8_2, m8_2, False, drop_sniff, "DUP_2_SMALLER", "08_dup_2_smaller")
+        marker10_2 = b"T_DUP_2_" + struct.pack("!I", base + 1)
+        epic.pkt_ts = epic.pkt_ts - 5; epic_pkt = epic.build_epic()
+        pkt10_2 = (
+            Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+            ipv6 /
+            srh_pkt /
+            Raw(load=epic_pkt) /
+            Raw(load=marker10_2)
+        )
+
+        send_and_expect(pkt10_2, marker10_2, False, drop_sniff, "DUP_2_SMALLER", "10_dup_2_smaller")
         print("Packet 2 dropped (as expected) ...    ", end='\r')
 
-        t3 = PKT_TS + 0x300  # greater -> forward
-        m8_3 = b"T_DUP_3_" + struct.pack("!I", base + 2)
-        p8_3, _, _ = build_epic_packet(marker=m8_3, pkt_ts_override=t3)
-        send_and_expect(p8_3, m8_3, True, good_sniff, "DUP_3_GREATER", "08_dup_3_greater")
+        marker10_3 = b"T_DUP_3_" + struct.pack("!I", base + 2)
+        epic.pkt_ts = epic.pkt_ts + 50; epic_pkt = epic.build_epic()
+        pkt10_3 = (
+            Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+            ipv6 /
+            srh_pkt /
+            Raw(load=epic_pkt) /
+            Raw(load=marker10_3)
+        )
+
+        send_and_expect(pkt10_3, marker10_3, True, good_sniff, "DUP_3_GREATER", "10_dup_3_greater")
         print("Packet 3 forwarded (as expected) ...  ", end='\r')
 
-        t4 = t3  # equal -> drop
-        m8_4 = b"T_DUP_4_" + struct.pack("!I", base + 3)
-        p8_4, _, _ = build_epic_packet(marker=m8_4, pkt_ts_override=t4)
-        send_and_expect(p8_4, m8_4, False, drop_sniff, "DUP_4_EQUAL", "08_dup_4_equal")
+        marker10_4 = b"T_DUP_4_" + struct.pack("!I", base + 3)
+        epic_pkt = epic.build_epic() # Unchanged timestamp
+        pkt10_4 = (
+            Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+            ipv6 /
+            srh_pkt /
+            Raw(load=epic_pkt) /
+            Raw(load=marker10_4)
+        )
+
+        send_and_expect(pkt10_4, marker10_4, False, drop_sniff, "DUP_4_EQUAL", "10_dup_4_equal")
         print("Packet 4 dropped (as expected) ...    ", end='\r')
 
-        t5 = PKT_TS + 0x250  # smaller than latest (t3) -> drop
-        m8_5 = b"T_DUP_5_" + struct.pack("!I", base + 4)
-        p8_5, _, _ = build_epic_packet(marker=m8_5, pkt_ts_override=t5)
-        send_and_expect(p8_5, m8_5, False, drop_sniff, "DUP_5_SMALLER_AFTER_UPDATE", "08_dup_5_smaller_after")
+        marker10_5 = b"T_DUP_5_" + struct.pack("!I", base + 4)
+        epic.pkt_ts = epic.pkt_ts - 5; epic_pkt = epic.build_epic()
+        pkt10_5 = (
+            Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+            ipv6 /
+            srh_pkt /
+            Raw(load=epic_pkt) /
+            Raw(load=marker10_5)
+        )
+
+        send_and_expect(pkt10_5, marker10_5, False, drop_sniff, "DUP_5_SMALLER_AFTER_UPDATE", "10_dup_5_smaller_after")
         print("Packet 5 dropped (as expected) ...    ", end='\r')
 
         print("✅ [PASS] DUP test: smaller+equal timestamps drop, greater passes (5-step)")
@@ -347,31 +410,45 @@ def run():
         print("❌ [FAIL] DUP 5-step test failed")
 
 
+    #11) DIFF_PO: 2 packets, origin2 != origin1
+    base = (int(time.time()) & 0xFFFFFFFF) + 200
 
-    #9) DIFF_PO: 2 packets, origin2 != origin1
+    marker11_1 = b"T_PO_1_" + struct.pack("!I", base)
+    epic.pkt_ts = epic.pkt_ts + 20; epic_pkt = epic.build_epic()
+    srh_pkt = srh.build_srh()
+    pkt11_1 = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic_pkt) /
+        Raw(load=marker11_1)
+    )
+
+    marker11_2 = b"T_PO_2_" + struct.pack("!I", base + 1)
+    epic2 = EpicBuilder(epic.key0, epic.key1,
+                        epic.src_as_host ^ 0x0101010101010101,
+                        epic.segid ^ 0x1010,
+                        epic.pkt_ts, # Same teimstamps
+                        epic.path_ts ^ 0x10101010,
+                        epic.per_hop_count, epic.epic_next_hdr, epic.ts_expiry, epic.ingress_port, epic.egress_port)
+
+    epic2_pkt = epic2.build_epic()
+    pkt11_2 = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic2_pkt) /
+        Raw(load=marker11_2)
+    )
+
     try:
-        base = (int(time.time()) & 0xFFFFFFFF) + 200
-
         # Origin #1
-        t9_1 = PKT_TS + 0x400
-        m9_1 = b"T_PO1_" + struct.pack("!I", base)
-        p9_1, _, _ = build_epic_packet(marker=m9_1, pkt_ts_override=t9_1)
-        send_and_expect(p9_1, m9_1, True, good_sniff, "PO1", "09_po1")
+        send_and_expect(pkt11_1, marker11_1, True, good_sniff, "PO_1", "11_PO_1")
 
         # Origin #2 (different src and segid) with smaller timestamp
-        t9_2 = PKT_TS + 0x010  # smaller than t9_1
-        src2 = SRC_AS_HOST ^ 0x0101010101010101
-        seg2 = SEG_ID ^ 0xBEEF
-        m9_2 = b"T_PO2_" + struct.pack("!I", base + 1)
-        p9_2, _, _ = build_epic_packet(
-            marker=m9_2,
-            pkt_ts_override=t9_2,
-            src_override=src2,
-            segid_override=seg2
-        )
-        send_and_expect(p9_2, m9_2, True, good_sniff, "PO2_SMALLER_TS_DIFFERENT_ORIGIN", "09_po2_smaller_ts")
+        send_and_expect(pkt11_2, marker11_2, True, good_sniff, "PO_2", "11_PO_2")
 
-        print("✅ [PASS] Different packet-origin allows smaller timestamp (2-step)")
+        print("✅ [PASS] Different packet-origin allows equal timestamp (2-step)")
         valid_tests += 1
     except AssertionError as e:
         if PRINT_ERRORS:
@@ -383,7 +460,6 @@ def run():
 
     if WRITE_PCAPS:
         print(f"PCAPs written under: {os.path.abspath(PCAP_DIR)}")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test script for EPIC P4 with Duplicate Detection on Tofino Model")
@@ -408,7 +484,7 @@ if __name__ == "__main__":
     parser.add_argument("--key1", type=lambda x: int(x, 0), default=0x42413938, help="SipHash Key 1 (32-bit hex)")
     
     # Logic / IO
-    parser.add_argument("--pcap-dir", type=str, default="../tmp/", help="Directory to save PCAP files")
+    parser.add_argument("--pcap-dir", type=str, default="../tmp/dualpipeds", help="Directory to save PCAP files")
     parser.add_argument("--no-pcap", action="store_false", dest="write_pcaps", help="Disable PCAP writing")
     parser.add_argument("--relaxed", action="store_false", dest="strict_drop", help="Disable strict port sniffing for drops")
 
@@ -436,4 +512,4 @@ if __name__ == "__main__":
     INGRESS_IFACE = port_to_iface(INGRESS_PORT)
     EGRESS_IFACE  = port_to_iface(EGRESS_PORT)
 
-    run()
+    run_tests()

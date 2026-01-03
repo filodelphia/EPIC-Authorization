@@ -31,6 +31,23 @@ dualpipeds:
 	
 	make -C build/dualpipeds -j"$(nproc)" -l"$(nproc)" install
 
+col:
+	make dscollision
+
+dscollision:
+	rm -rf build/dscollision
+	mkdir -p build/dscollision
+	cmake $$SDE/p4studio -B build/dscollision					\
+		-DCMAKE_MODULE_PATH="$$SDE/cmake/"						\
+		-DCMAKE_INSTALL_PREFIX="$$SDE_INSTALL" 					\
+		-DP4C=$$SDE_INSTALL/bin/p4c 							\
+		-DP4_PATH=$$PWD/src/ds-collision-test/dscollision.p4	\
+		-DP4_NAME=dscollision									\
+		-DP4_LANG=p4_16 										\
+		-DTOFINO=ON
+	
+	make -C build/dscollision -j"$(nproc)" -l"$(nproc)" install
+
 .CLEANUP:
 	rm -rf build/dualpipe
 	rm -rf build/dualpipeds

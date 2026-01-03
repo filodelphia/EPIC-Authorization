@@ -223,9 +223,16 @@ parser EpicIngressParser(
 
     state parse_epic {
         packet.extract(hdr.epic);
+		transition select(hdr.epic.per_hop_count){
+			0: reject;
+			default: parse_per_hop;
+		}
+    }
+
+	state parse_per_hop {
 		packet.extract(hdr.epic_per_hop);
 		transition accept;
-    }
+	}
 }
 
 
@@ -353,9 +360,7 @@ control EpicIngress(inout epic_headers_t hdr,
 	/******** RegisterActions ********/
     RegisterAction<bit<32>, bit<32>, bit<1>>(reg_po) po_check32 = {
         void apply(inout bit<32> stored, out bit<1> ok) {
-            if (stored == 0) {
-                ok = 1;
-            } else if (ig_md.new_ts32 > stored) {
+            if (stored == 0 || ig_md.new_ts32 > stored) {
                 ok = 1;
             } else {
                 ok = 0;
@@ -366,10 +371,7 @@ control EpicIngress(inout epic_headers_t hdr,
 
     RegisterAction<bit<32>, bit<32>, bit<1>>(reg_po) po_update32 = {
         void apply(inout bit<32> stored, out bit<1> ok) {
-            if (stored == 0) {
-                stored = ig_md.new_ts32;
-                ok = 1;
-            } else if (ig_md.new_ts32 > stored) {
+            if (stored == 0 || ig_md.new_ts32 > stored) {
                 stored = ig_md.new_ts32;
                 ok = 1;
             } else {
@@ -430,10 +432,13 @@ control EpicIngress(inout epic_headers_t hdr,
 			hdr.ethernet.etherType = TYPE_IPV6;
 			hdr.mac_res.setInvalid();
 
-			if(hdr.epic.per_hop_count > 1) hdr.epic.per_hop_count = hdr.epic.per_hop_count - 1;
-			else {
-				hdr.ipv6.nextHeader = hdr.epic.nextHeader;
+			if(hdr.epic.per_hop_count > 1) {
+				hdr.epic.per_hop_count = hdr.epic.per_hop_count - 1;
+				hdr.ipv6.payloadLen = hdr.ipv6.payloadLen - 8;
+			} else {
+				hdr.srh_fixed.nextHeader = hdr.epic.nextHeader;
 				hdr.epic.setInvalid();
+				hdr.ipv6.payloadLen = hdr.ipv6.payloadLen - 30;
 			}
 
 			route_to((bit <9>) hdr.epic_per_hop.egress_if);

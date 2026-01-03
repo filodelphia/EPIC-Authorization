@@ -2,241 +2,237 @@
 import struct
 import time
 import random
-from typing import List, Optional
+import os
+from typing import Optional, List
 
 import argparse
+
+# Packet imports
 from scapy.layers.l2 import Ether
-from scapy.layers.inet6 import IPv6, IPv6ExtHdrSegmentRouting
+from scapy.layers.inet6 import IPv6
 from scapy.packet import Raw
 from scapy.sendrecv import sendp, AsyncSniffer
+from scapy.utils import wrpcap
 
-from include.halfsiphash import halfsiphash_2_4_32, swap16_halves, u24
-from include.tofinoports import port_to_iface
+from include.PacketBuilder import EpicBuilder, SRHBuilder
+
+# tofino ports
+from include.tofinoports import port_to_iface, all_model_port_ifaces
 
 # -----------------------------
-# CONFIG GLOBALS (set by argparse)
+# CONFIG GLOBALS (To be set by argparse)
 # -----------------------------
 INGRESS_PORT = 0
 EGRESS_PORT  = 1
-
-# IMPORTANT: dual-pipe + multi-pass often needs >0.15s in the model
-SNIFF_TIMEOUT = 1.0
-
+SNIFF_TIMEOUT = 1.2
 SRC_MAC = "02:00:00:00:00:01"
 DST_MAC = "02:00:00:00:00:02"
-
-PATH_TS = 0x22222222
 PER_HOP_COUNT = 1
-EPIC_NEXT_HDR = 59
-TSEXP  = 0x01
-SEG_ID = 0x1234
-
+TSEXP     = 0x01
 SID_LIST = ["2001:db8:0:1::1", "2001:db8:0:2::1"]
-SRH_NH  = 43
-EPIC_NH = 253
-
+IPV6_NEXT_HEADER  = 43
+SRH_NEXT_HEADER = 253
+EPIC_NEXT_HDR = 59
 SIP_KEY_0 = 0x33323130
 SIP_KEY_1 = 0x42413938
+PKT_TS = 0x1111111100000000
+PCAP_DIR = "../tmp/hashcoll"
+WRITE_PCAPS = True
+PRINT_ERRORS = False
 
-# Derived
+# Derived at runtime
 INGRESS_IFACE = ""
 EGRESS_IFACE  = ""
+CLEAR_ETYPE = 0xEA06  # register-clear ethertype
 
 # Benchmark controls
-MAX_TRIALS = 20000
-RNG_SEED   = 1
+MAX_TRIALS = 200
+RNG_SEED = 1
+REG_SIZE = 4096
+FINAL_TS32 = int(time.time()) & 0xFFFFFFFF
+
 
 # -----------------------------
-# EPIC L1 MAC chain
+# Register reset packet builder (simple on purpose)
 # -----------------------------
-def compute_hop_mac(path_ts: int, tsexp: int, ing_port: int, eg_port: int, segid: int) -> int:
-    m0 = path_ts & 0xFFFFFFFF
-    m1 = ((ing_port & 0xFF) << 24) | ((eg_port & 0xFF) << 16) | (segid & 0xFFFF)
-    m2 = ((tsexp & 0xFF) << 24)
-    m3 = 0
-    return halfsiphash_2_4_32(SIP_KEY_0, SIP_KEY_1, [m0, m1, m2, m3])
+class RegisterResetBuilder:
+    src_mac: str
+    dst_mac: str
+    ethertype: int = CLEAR_ETYPE
 
-def compute_pkt_mac24(src_as_host: int, pkt_ts: int, hop_mac: int) -> int:
-    src_hi = (src_as_host >> 32) & 0xFFFFFFFF
-    src_lo = src_as_host & 0xFFFFFFFF
-    ts_hi  = (pkt_ts >> 32) & 0xFFFFFFFF
-    ts_lo  = pkt_ts & 0xFFFFFFFF
+    def __init__(self, src, dst):
+        self.src_mac = src
+        self.dst_mac = dst
 
-    k0 = hop_mac & 0xFFFFFFFF
-    k1 = swap16_halves(hop_mac) & 0xFFFFFFFF
+    def build(self, index: int):
+        # 32-bit index in network byte order
+        payload = struct.pack("!I", index & 0xFFFFFFFF)
+        return Ether(src=self.src_mac, dst=self.dst_mac, type=self.ethertype) / Raw(load=payload)
 
-    mac32 = halfsiphash_2_4_32(k0, k1, [src_hi, src_lo, ts_hi, ts_lo])
-    return u24(mac32)
+    def clear_all(self, iface: str, reg_size: int, chunk: int = 256):
+        burst = []
+        for i in range(reg_size):
+            burst.append(self.build(i))
+            if len(burst) >= chunk:
+                sendp(burst, iface=iface, verbose=False)
+                burst.clear()
+        if burst:
+            sendp(burst, iface=iface, verbose=False)
+        time.sleep(0.05)  # let the model drain
 
-def pack_epic_payload(src_as_host: int, pkt_ts: int, path_ts: int,
-                      per_hop_count: int, epic_next_hdr: int,
-                      tsexp: int, ing_port: int, eg_port: int, segid: int,
-                      hop_validation24: int) -> bytes:
-    epic_h = struct.pack("!QQIBB",
-                         src_as_host & 0xFFFFFFFFFFFFFFFF,
-                         pkt_ts & 0xFFFFFFFFFFFFFFFF,
-                         path_ts & 0xFFFFFFFF,
-                         per_hop_count & 0xFF,
-                         epic_next_hdr & 0xFF)
 
-    per_hop = struct.pack("!BBBH",
-                          tsexp & 0xFF,
-                          ing_port & 0xFF,
-                          eg_port & 0xFF,
-                          segid & 0xFFFF)
-
-    per_hop += (hop_validation24 & 0xFFFFFF).to_bytes(3, "big")
-    return epic_h + per_hop
-
-def build_epic_packet(marker: bytes, src_as_host: int, pkt_ts: int, segid: int):
-    hop_mac = compute_hop_mac(PATH_TS, TSEXP, INGRESS_PORT, EGRESS_PORT, segid)
-    hvf24   = compute_pkt_mac24(src_as_host, pkt_ts, hop_mac)
-
-    epic_bytes = pack_epic_payload(
-        src_as_host, pkt_ts, PATH_TS,
-        PER_HOP_COUNT, EPIC_NEXT_HDR,
-        TSEXP, INGRESS_PORT, EGRESS_PORT, segid,
-        hvf24
+# -----------------------------
+# IO helpers
+# -----------------------------
+def _start_sniffer(ifaces, marker: bytes) -> AsyncSniffer:
+    sn = AsyncSniffer(
+        iface=ifaces,
+        store=True,
+        filter="ip6",
+        lfilter=lambda p: marker in bytes(p),
     )
+    sn.start()
+    time.sleep(0.05)
+    return sn
 
-    segleft = len(SID_LIST) - 1
-    dst = SID_LIST[segleft]
 
-    ipv6 = IPv6(src="2001:db8::100", dst=dst, nh=SRH_NH)
-    srh = IPv6ExtHdrSegmentRouting(nh=EPIC_NH)
-    srh.addresses = SID_LIST
-    srh.lastentry = len(SID_LIST) - 1
-    srh.segleft   = segleft
+def send_and_expect(pkt, marker: bytes, expect_forward: bool,
+                    sniff_ifaces: List[str],
+                    label: str):
+    sn = _start_sniffer(sniff_ifaces, marker)
 
-    return (
-        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
-        ipv6 /
-        srh /
-        Raw(load=epic_bytes) /
-        Raw(load=marker)
-    )
+    # Always inject on INGRESS_PORT (port 0 -> veth0)
+    sendp(pkt, iface=INGRESS_IFACE, verbose=False)
 
-# -----------------------------
-# Sniffer + wait-for-marker
-# -----------------------------
-_seen_i = set()
+    time.sleep(SNIFF_TIMEOUT)
+    pkts = sn.stop()
 
-def _on_pkt(pkt):
-    b = bytes(pkt)
-    # marker format: b"T_COLL_" + u32(i)
-    off = b.find(b"T_COLL_")
-    if off != -1 and off + 11 <= len(b):
-        i = struct.unpack("!I", b[off + 7: off + 11])[0]
-        _seen_i.add(i)
+    if expect_forward and len(pkts) == 0:
+        raise AssertionError(f"[{label}] Expected FORWARD, but marker not seen on {sniff_ifaces}")
+    if (not expect_forward) and len(pkts) > 0:
+        raise AssertionError(f"[{label}] Expected DROP, but marker seen on {sniff_ifaces} (count={len(pkts)})")
+    
+    return pkts
 
-def wait_seen(i: int, timeout_s: float) -> bool:
-    deadline = time.perf_counter() + timeout_s
-    while time.perf_counter() < deadline:
-        if i in _seen_i:
-            return True
-        time.sleep(0.002)
-    return False
 
 # -----------------------------
 # Benchmark
 # -----------------------------
-def run():
-    print(f"Injecting on port {INGRESS_PORT} ({INGRESS_IFACE}), expecting final forward on {EGRESS_PORT} ({EGRESS_IFACE})")
-    print(f"max_trials={MAX_TRIALS}, per_pkt_timeout={SNIFF_TIMEOUT}s\n")
-    print(f"Using seed {RNG_SEED}")
+def run_test():
+    print(f"Injecting on port {INGRESS_PORT} ({INGRESS_IFACE}), expecting forward on port {EGRESS_PORT} ({EGRESS_IFACE})\n")
+    good_sniff = [EGRESS_IFACE]
 
-    rng = random.Random(RNG_SEED)
+    # Replaced every new packet    SRC_AS_HOST, SEG_ID, PATH_TS
+    epic = EpicBuilder(SIP_KEY_0, SIP_KEY_1, 0, 0, PKT_TS, 0, PER_HOP_COUNT, EPIC_NEXT_HDR, TSEXP, INGRESS_PORT, EGRESS_PORT)
+    srh = SRHBuilder(SID_LIST, SRH_NEXT_HEADER)
+    ipv6 = IPv6(src="2001:db8::100", dst=srh.sid_list[srh.last_entry], nh=IPV6_NEXT_HEADER)
+    clear_reg = RegisterResetBuilder(SRC_MAC, DST_MAC)
 
-    # Use a fixed timestamp across all trials (this is what makes collisions observable as drops).
-    # IMPORTANT: if registers are not cleared from previous runs, this can still fail at i=1 legitimately.
-    base_ts = (0xF000000000000000 | (int(time.time()) & 0xFFFFFFFFFFFF))
+    rng = random.Random(RNG_SEED + 1)
 
-    sn = AsyncSniffer(
-        iface=[EGRESS_IFACE],
-        store=False,
-        filter="ip6",
-        prn=_on_pkt
-    )
-    sn.start()
-    time.sleep(0.05)
+    j = 0
+    pkts = list() 
+    while j < MAX_TRIALS:
+        j += 1
 
-    try:
-        # Pre-flight: ensure at least one packet comes back out of the *final* egress.
-        _seen_i.clear()
-        pre_i = 0xAAAAAAAA
-        pre_marker = b"T_COLL_" + struct.pack("!I", pre_i)
-        pre_pkt = build_epic_packet(pre_marker, src_as_host=0x0123456789ABCDEF, pkt_ts=base_ts + 1, segid=SEG_ID)
-        sendp(pre_pkt, iface=INGRESS_IFACE, verbose=False)
-        if not wait_seen(pre_i, SNIFF_TIMEOUT):
-            raise RuntimeError(
-                "Pre-test faild, did no see packet in egress. Either caused by\n" \
-                "\t1. Timeout too small\n" \
-                "\t2. Sniffing on the wrong interface\n" \
-                "\t3. Dual pipe chain not completing"
+        clear_reg.clear_all(INGRESS_IFACE, REG_SIZE)
+        pkts.clear()
+    
+        i_th = 0
+        while True:
+            i_th += 1
+
+            base = (int(time.time()) & 0xFFFFFFFF) + 200
+            srh_pkt = srh.build_srh()
+            marker = b"T_PO_" + struct.pack("!I", i_th) + b"_" + struct.pack("!I", base)
+
+            epic.src_as_host = rng.getrandbits(64)
+            epic.segid = rng.getrandbits(16)
+            epic.path_ts = rng.getrandbits(32)
+
+            pkt_ts_hi = (PKT_TS >> 32) & 0xFFFFFFFF
+            pkt_ts_lo = (FINAL_TS32 - epic.path_ts) & 0xFFFFFFFF
+            epic.pkt_ts = (pkt_ts_hi << 32) | pkt_ts_lo
+            epic_pkt = epic.build_epic()
+            
+            pkt = (
+                Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+                ipv6 /
+                srh_pkt /
+                Raw(load=epic_pkt) /
+                Raw(load=marker)
             )
 
-        start = time.perf_counter()
-        collided_at: Optional[int] = None
-
-        for i in range(1, MAX_TRIALS + 1):
-            src_rand = rng.getrandbits(64)
-            seg_rand = (SEG_ID + (i * 0x9E37)) & 0xFFFF
-            marker = b"T_COLL_" + struct.pack("!I", i)
-
-            pkt = build_epic_packet(marker, src_as_host=src_rand, pkt_ts=base_ts, segid=seg_rand)
-            sendp(pkt, iface=INGRESS_IFACE, verbose=False)
-
-            if not wait_seen(i, SNIFF_TIMEOUT):
-                collided_at = i
+            try:
+                packet = send_and_expect(pkt, marker, True, good_sniff, f"PO_{i_th}")
+                pkts.extend(packet)
+            except AssertionError as e:
+                if PRINT_ERRORS:
+                    print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+                print(f"❌ First hash collision on round {j} found at packet {i_th}")
                 break
+        
+        if WRITE_PCAPS:
+            os.makedirs(PCAP_DIR, exist_ok=True)
+            wrpcap(os.path.join(PCAP_DIR, f"hashcoll_{j}.pcap"), pkts)
+    
 
-        elapsed = time.perf_counter() - start
+    if WRITE_PCAPS:
+        print(f"PCAPs written under: {os.path.abspath(PCAP_DIR)}")
 
-        if collided_at is None:
-            print(f"❌ No collision symptom observed in {MAX_TRIALS} packets (elapsed {elapsed:.3f}s)")
-            print("Note: this is 'masked-index aliasing' detection; you might need more trials or a smaller register to see it.")
-        else:
-            print(f"✅ First collision symptom at i={collided_at} (elapsed {elapsed:.3f}s)")
-            print("Two different packet origins likely mapped to the same masked CRC32 index")
-
-
-    finally:
-        sn.stop()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Hash/register aliasing benchmark for EPIC duplicate suppression (Tofino model)")
+    parser = argparse.ArgumentParser(description="Test script for EPIC P4 on Tofino Model")
+    
+    # Network Configuration
+    parser.add_argument("--ingress", type=int, default=0, help="Ingress Tofino port ID (default: 0)")
+    parser.add_argument("--egress", type=int, default=1, help="Expected Egress Tofino port ID (default: 1)")
+    parser.add_argument("--timeout", type=float, default=1.2, help="Sniff timeout in seconds (default: 1.2)")
+    parser.add_argument("--sid-list", type=str, nargs="+", default=["2001:db8:0:1::1", "2001:db8:0:2::1"], help="List of IPv6 SIDs")
+    
+    # MAC/Header Configuration
+    parser.add_argument("--src-mac", type=str, default="02:00:00:00:00:01", help="Source MAC address")
+    parser.add_argument("--dst-mac", type=str, default="02:00:00:00:00:02", help="Destination MAC address")
+    parser.add_argument("--show-errors", action="store_true", dest="show_errors", help="Print error description if any occur")
+    
+    # HalfSipHash Keys
+    parser.add_argument("--key0", type=lambda x: int(x, 0), default=0x33323130, help="SipHash Key 0 (32-bit hex)")
+    parser.add_argument("--key1", type=lambda x: int(x, 0), default=0x42413938, help="SipHash Key 1 (32-bit hex)")
+    
+    # Logic / IO
+    parser.add_argument("--pcap-dir", type=str, default="../tmp/hashcoll/", help="Directory to save PCAP files")
+    parser.add_argument("--no-pcap", action="store_false", dest="write_pcaps", help="Disable PCAP writing")
 
-    parser.add_argument("--ingress", type=int, default=0)
-    parser.add_argument("--egress", type=int, default=1)
-    parser.add_argument("--timeout", type=float, default=1.5)
-    parser.add_argument("--max", type=int, default=20000)
-
+    # Random
     default_seed = random.randrange(0, 2**32)
     parser.add_argument("--seed", type=int, default=default_seed)
+    parser.add_argument("--max", type=int, default=200)
 
-    parser.add_argument("--src-mac", type=str, default=SRC_MAC)
-    parser.add_argument("--dst-mac", type=str, default=DST_MAC)
-    parser.add_argument("--sid-list", type=str, nargs="+", default=SID_LIST)
+    # Hash collision
+    parser.add_argument("--reg-size", type=int, default=4096, help="Duplicate-suppression register size")
 
-    parser.add_argument("--key0", type=lambda x: int(x, 0), default=SIP_KEY_0)
-    parser.add_argument("--key1", type=lambda x: int(x, 0), default=SIP_KEY_1)
 
     args = parser.parse_args()
 
+    # Map args back to global variables used in the script
     INGRESS_PORT = args.ingress
     EGRESS_PORT  = args.egress
     SNIFF_TIMEOUT = args.timeout
-    MAX_TRIALS = args.max
-    RNG_SEED = args.seed
-
     SRC_MAC = args.src_mac
     DST_MAC = args.dst_mac
     SID_LIST = args.sid_list
-
     SIP_KEY_0 = args.key0
     SIP_KEY_1 = args.key1
+    PCAP_DIR = args.pcap_dir
+    WRITE_PCAPS = args.write_pcaps
+    PRINT_ERRORS = args.show_errors
 
+    RNG_SEED = args.seed
+    MAX_TRIALS = args.max
+    REG_SIZE = args.reg_size
+
+    # Initialize Interfaces
     INGRESS_IFACE = port_to_iface(INGRESS_PORT)
     EGRESS_IFACE  = port_to_iface(EGRESS_PORT)
 
-    run()
+    run_test()

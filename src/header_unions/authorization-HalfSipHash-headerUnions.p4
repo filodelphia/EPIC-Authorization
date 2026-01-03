@@ -242,7 +242,7 @@ parser IngressParser(
 	}
 
 	state parse_sip {
-		packet.extract(hdr.me_ext_headers.sip);
+		packet.extract(hdr.me_headers.sip);
 		packet.extract(hdr.me_ext_headers.sip_meta);
 		transition accept;
 	}
@@ -315,7 +315,7 @@ parser EgressParser(packet_in packet,
     }
 
 	state parse_sip {
-		packet.extract(hdr.me_ext_headers.sip);
+		packet.extract(hdr.me_headers.sip);
 		packet.extract(hdr.me_ext_headers.sip_meta);
 		transition accept;
 	}
@@ -567,10 +567,10 @@ control Ingress(inout headers_t hdr,
 
 	action create_packet_authorization(){
 		hdr.mac_loader.setValid();
-		ig_md.rotated_k1 = hdr.mac.calculated_mac[15:0]
-						 ++ hdr.mac.calculated_mac[31:16];
+		ig_md.rotated_k1 = hdr.mac_res.calculated_mac[15:0]
+						 ++ hdr.mac_res.calculated_mac[31:16];
 		
-		hdr.mac_loader.key_0 = hdr.mac.calculated_mac;
+		hdr.mac_loader.key_0 = hdr.mac_res.calculated_mac;
 		hdr.mac_loader.key_1 = ig_md.rotated_k1;
 
 		hdr.mac_loader.m_0 = (bit<32>)(hdr.me_headers.epic.src_as_host[63:32]);
@@ -579,10 +579,10 @@ control Ingress(inout headers_t hdr,
 		hdr.mac_loader.m_3 = (bit<32>)(hdr.me_headers.epic.packet_ts[31:0]);
 		
 		hdr.me_ext_headers.sip_meta.setValid();
-		hdr.me_headers.sip.etherType = hdr.mac.etherType;
+		hdr.me_headers.sip.etherType = hdr.mac_res.etherType;
 		hdr.ethernet.etherType = LOAD_KEY_2;
 
-		hdr.mac.setInvalid();
+		hdr.mac_loader.setInvalid();
 		ig_tm_md.ucast_egress_port = ig_md.rnd_port_for_recirc;
 		ig_md.early_exit = true;
 	}
@@ -653,7 +653,7 @@ control Ingress(inout headers_t hdr,
 		epic_stage.apply();
 
 		if(hdr.mac_res.isValid() && hdr.ethernet.etherType == MAC_2){
-			if((bit <24>) (hdr.mac.calculated_mac[23:0]) != hdr.me_ext_headers.epic_per_hop.hop_validation){
+			if((bit <24>) (hdr.mac_res.calculated_mac[23:0]) != hdr.me_ext_headers.epic_per_hop.hop_validation){
 				drop();
 				ig_md.early_exit = true;
 			}
@@ -905,9 +905,9 @@ control Egress(inout headers_t hdr,
 		} else {
 			final_round_xor();
 
-			hdr.mac.setValid();
-			hdr.mac.calculated_mac = hdr.me_headers.sip.m_0;
-			hdr.mac.etherType = hdr.me_headers.sip.etherType;
+			hdr.mac_res.setValid();
+			hdr.mac_res.calculated_mac = hdr.me_headers.sip.m_0;
+			hdr.mac_res.etherType = hdr.me_headers.sip.etherType;
 			if(hdr.ethernet.etherType == SIP_AUTHENTICATOR) hdr.ethernet.etherType = MAC_1;
 			else if(hdr.ethernet.etherType == SIP_VALIDATION) hdr.ethernet.etherType = MAC_2;
 
@@ -930,7 +930,7 @@ control IngressDeparser(
 		packet.emit(hdr.ethernet);
 
 		packet.emit(hdr.mac_loader);
-		packet.emit(hdr.mac); // TODO? Should the MAC be deparsed in the ingress? When? Why?
+		packet.emit(hdr.mac_res);
 
 		// Emit sip and sip_meta only during recirculation
         packet.emit(hdr.me_ext_headers.sip_meta);
@@ -950,7 +950,7 @@ control EgressDeparser(
 	
     apply {
 		packet.emit(hdr.ethernet);
-		packet.emit(hdr.mac);
+		packet.emit(hdr.mac_res);
         packet.emit(hdr.me_ext_headers.sip_meta);
         packet.emit(hdr.me_ext_headers.sip_meta);
 	}
