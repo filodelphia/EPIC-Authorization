@@ -40,12 +40,17 @@ SIP_KEY_0 = 0x33323130
 SIP_KEY_1 = 0x42413938
 PCAP_DIR = "../tmp/"
 WRITE_PCAPS = True
+WRITE_SINGULAR = False
 STRICT_DROP = True
 PRINT_ERRORS = False
 
 # Derived at runtime
 INGRESS_IFACE = ""
 EGRESS_IFACE  = ""
+
+# Packets list
+GLOBAL_PKT_TX = list()
+GLOBAL_PKT_RX = list()
 
 
 # -----------------------------
@@ -77,9 +82,15 @@ def send_and_expect(pkt, marker: bytes, expect_forward: bool,
 
     if WRITE_PCAPS and pcap_prefix:
         os.makedirs(PCAP_DIR, exist_ok=True)
-        wrpcap(os.path.join(PCAP_DIR, f"{pcap_prefix}_tx.pcap"), [pkt])
-        if pkts:
-            wrpcap(os.path.join(PCAP_DIR, f"{pcap_prefix}_rx.pcap"), pkts)
+
+        if WRITE_SINGULAR:
+            wrpcap(os.path.join(PCAP_DIR, f"{pcap_prefix}_tx.pcap"), [pkt])
+            if pkts:
+                wrpcap(os.path.join(PCAP_DIR, f"{pcap_prefix}_rx.pcap"), pkts)
+        else:
+            GLOBAL_PKT_TX.append(pkt)
+            if pkts:
+                GLOBAL_PKT_RX.extend(pkts)
 
     if expect_forward and len(pkts) == 0:
         raise AssertionError(f"[{label}] Expected FORWARD, but marker not seen on {sniff_ifaces}")
@@ -309,7 +320,7 @@ def run_tests():
         ipv6 /
         srh_pkt /
         Raw(load=epic_pkt) /
-        Raw(load=marker9_1)
+        Raw(load=marker9_2)
     )
 
     try:
@@ -331,6 +342,10 @@ def run_tests():
     else: print(f"{total_test - valid_tests} TESTS FAILED ❌")
 
     if WRITE_PCAPS:
+        if not WRITE_SINGULAR:
+            wrpcap(os.path.join(PCAP_DIR, "Transmitted.pcap"), [GLOBAL_PKT_TX])
+            wrpcap(os.path.join(PCAP_DIR, "Recieved.pcap"), [GLOBAL_PKT_RX])
+
         print(f"PCAPs written under: {os.path.abspath(PCAP_DIR)}")
 
 
@@ -359,6 +374,7 @@ if __name__ == "__main__":
     # Logic / IO
     parser.add_argument("--pcap-dir", type=str, default="../tmp/dualpipe/", help="Directory to save PCAP files")
     parser.add_argument("--no-pcap", action="store_false", dest="write_pcaps", help="Disable PCAP writing")
+    parser.add_argument("--write-singular", action="store_true", dest="write_singular", help="Write two pcap files (tx/rx) per test")
     parser.add_argument("--relaxed", action="store_false", dest="strict_drop", help="Disable strict port sniffing for drops")
 
     args = parser.parse_args()
@@ -378,6 +394,7 @@ if __name__ == "__main__":
     SIP_KEY_1 = args.key1
     PCAP_DIR = args.pcap_dir
     WRITE_PCAPS = args.write_pcaps
+    WRITE_SINGULAR = args.write_singular
     STRICT_DROP = args.strict_drop
     PRINT_ERRORS = args.show_errors
 
