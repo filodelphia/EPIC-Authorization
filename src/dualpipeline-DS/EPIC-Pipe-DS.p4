@@ -357,18 +357,7 @@ control EpicIngress(inout epic_headers_t hdr,
         ig_md.po_index = h & EPIC_PO_MASK;
     }
 
-	/******** RegisterActions ********/
-    RegisterAction<bit<32>, bit<32>, bit<1>>(reg_po) po_check32 = {
-        void apply(inout bit<32> stored, out bit<1> ok) {
-            if (stored == 0 || ig_md.new_ts32 > stored) {
-                ok = 1;
-            } else {
-                ok = 0;
-            }
-            // stored unchanged
-        }
-    };
-
+	/******** RegisterAction ********/
     RegisterAction<bit<32>, bit<32>, bit<1>>(reg_po) po_update32 = {
         void apply(inout bit<32> stored, out bit<1> ok) {
             if (stored == 0 || ig_md.new_ts32 > stored) {

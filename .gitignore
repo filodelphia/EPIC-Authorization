@@ -1,5 +1,5 @@
 # Ignore temp folder
-temp/
+temp/*
 
 # Tofino compiled files
 *.tofino

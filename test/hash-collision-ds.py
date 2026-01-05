@@ -43,43 +43,12 @@ PRINT_ERRORS = False
 # Derived at runtime
 INGRESS_IFACE = ""
 EGRESS_IFACE  = ""
-CLEAR_ETYPE = 0xEA06  # register-clear ethertype
 
 # Benchmark controls
 MAX_TRIALS = 200
 RNG_SEED = 1
 REG_SIZE = 4096
-FINAL_TS32 = int(time.time()) & 0xFFFFFFFF
-
-
-# -----------------------------
-# Register reset packet builder (simple on purpose)
-# -----------------------------
-class RegisterResetBuilder:
-    src_mac: str
-    dst_mac: str
-    ethertype: int = CLEAR_ETYPE
-
-    def __init__(self, src, dst):
-        self.src_mac = src
-        self.dst_mac = dst
-
-    def build(self, index: int):
-        # 32-bit index in network byte order
-        payload = struct.pack("!I", index & 0xFFFFFFFF)
-        return Ether(src=self.src_mac, dst=self.dst_mac, type=self.ethertype) / Raw(load=payload)
-
-    def clear_all(self, iface: str, reg_size: int, chunk: int = 256):
-        burst = []
-        for i in range(reg_size):
-            burst.append(self.build(i))
-            if len(burst) >= chunk:
-                sendp(burst, iface=iface, verbose=False)
-                burst.clear()
-        if burst:
-            sendp(burst, iface=iface, verbose=False)
-        time.sleep(0.05)  # let the model drain
-
+FINAL_TS = 150
 
 # -----------------------------
 # IO helpers
@@ -126,7 +95,6 @@ def run_test():
     epic = EpicBuilder(SIP_KEY_0, SIP_KEY_1, 0, 0, PKT_TS, 0, PER_HOP_COUNT, EPIC_NEXT_HDR, TSEXP, INGRESS_PORT, EGRESS_PORT)
     srh = SRHBuilder(SID_LIST, SRH_NEXT_HEADER)
     ipv6 = IPv6(src="2001:db8::100", dst=srh.sid_list[srh.last_entry], nh=IPV6_NEXT_HEADER)
-    clear_reg = RegisterResetBuilder(SRC_MAC, DST_MAC)
 
     rng = random.Random(RNG_SEED + 1)
 
@@ -135,7 +103,6 @@ def run_test():
     while j < MAX_TRIALS:
         j += 1
 
-        clear_reg.clear_all(INGRESS_IFACE, REG_SIZE)
         pkts.clear()
     
         i_th = 0
@@ -148,11 +115,8 @@ def run_test():
 
             epic.src_as_host = rng.getrandbits(64)
             epic.segid = rng.getrandbits(16)
-            epic.path_ts = rng.getrandbits(32)
-
-            pkt_ts_hi = (PKT_TS >> 32) & 0xFFFFFFFF
-            pkt_ts_lo = (FINAL_TS32 - epic.path_ts) & 0xFFFFFFFF
-            epic.pkt_ts = (pkt_ts_hi << 32) | pkt_ts_lo
+            epic.path_ts = rng.randint(0, FINAL_TS*j)
+            epic.pkt_ts = (FINAL_TS*j) - epic.path_ts
             epic_pkt = epic.build_epic()
             
             pkt = (
@@ -167,9 +131,12 @@ def run_test():
                 packet = send_and_expect(pkt, marker, True, good_sniff, f"PO_{i_th}")
                 pkts.extend(packet)
             except AssertionError as e:
-                if PRINT_ERRORS:
-                    print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
-                print(f"❌ First hash collision on round {j} found at packet {i_th}")
+                if(i_th == 1):
+                    print(marker)
+
+                    j -= 1
+
+                print(f"First hash collision on round {j} found at packet {i_th}")
                 break
         
         if WRITE_PCAPS:

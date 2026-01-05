@@ -105,7 +105,7 @@ def run_tests():
     srh = SRHBuilder(SID_LIST, SRH_NEXT_HEADER)
     ipv6 = IPv6(src="2001:db8::100", dst=srh.sid_list[srh.last_entry], nh=IPV6_NEXT_HEADER)
 
-    total_test = 11
+    total_test = 12
     valid_tests = 0
 
     # 1) VALID
@@ -325,9 +325,47 @@ def run_tests():
             print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
         print("❌ [FAIL] REUSE test: reused HVF with different timestamp forwarded")
 
+
+    #10) INCR_TS: Two packets with increasing timestamp
+    base = (int(time.time()) & 0xFFFFFFFF) + 200
+
+    marker10_1 = b"T_INCR_TS_1_" + struct.pack("!I", base)
+    epic.pkt_ts = epic.pkt_ts + 20; epic_pkt = epic.build_epic()
+    srh_pkt = srh.build_srh()
+    pkt10_1 = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic_pkt) /
+        Raw(load=marker10_1)
+    )
+
+    marker10_2 = b"T_INCR_TS_2_" + struct.pack("!I", base + 1)
+    epic.pkt_ts = epic.pkt_ts + 1; epic_pkt = epic.build_epic()
+    pkt10_2 = (
+        Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
+        ipv6 /
+        srh_pkt /
+        Raw(load=epic_pkt) /
+        Raw(load=marker10_2)
+    )
+
+    try:
+        # Origin #1
+        send_and_expect(pkt10_1, marker10_1, True, good_sniff, "INCR_TS_1", "10_INCR_TS_1")
+
+        # Origin #2 (different src and segid) with smaller timestamp
+        send_and_expect(pkt10_2, marker10_2, True, good_sniff, "INCR_TS_2", "10_INCR_TS_1")
+
+        print("✅ [PASS] Strictly increasing timestamp from the same PO")
+        valid_tests += 1
+    except AssertionError as e:
+        if PRINT_ERRORS:
+            print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
+        print("❌ [FAIL] INCR_TS test faild ")
     
 
-    #10) DUP/ORDERING: 5 packets, show both kinds of drop (smaller and equal)
+    #11) DUP/ORDERING: 5 packets, show both kinds of drop (smaller and equal)
     #    1st: forward (ts=t1)
     #    2nd: drop    (ts<t1)
     #    3rd: forward (ts>t1)
@@ -337,69 +375,69 @@ def run_tests():
     srh_pkt = srh.build_srh()
     
     try:
-        marker10_1 = b"T_DUP_1_" + struct.pack("!I", base)
+        marker11_1 = b"T_DUP_1_" + struct.pack("!I", base)
         epic.pkt_ts = epic.pkt_ts + 10; epic_pkt = epic.build_epic()
-        pkt10_1 = (
+        pkt11_1 = (
             Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
             ipv6 /
             srh_pkt /
             Raw(load=epic_pkt) /
-            Raw(load=marker10_1)
+            Raw(load=marker11_1)
         )
 
-        send_and_expect(pkt10_1, marker10_1, True, good_sniff, "DUP_1", "10_dup_1")
+        send_and_expect(pkt11_1, marker11_1, True, good_sniff, "DUP_1", "10_dup_1")
         print("Packet 1 forwarded ...", end='\r')
 
-        marker10_2 = b"T_DUP_2_" + struct.pack("!I", base + 1)
+        marker11_2 = b"T_DUP_2_" + struct.pack("!I", base + 1)
         epic.pkt_ts = epic.pkt_ts - 5; epic_pkt = epic.build_epic()
-        pkt10_2 = (
+        pkt11_2 = (
             Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
             ipv6 /
             srh_pkt /
             Raw(load=epic_pkt) /
-            Raw(load=marker10_2)
+            Raw(load=marker11_2)
         )
 
-        send_and_expect(pkt10_2, marker10_2, False, drop_sniff, "DUP_2_SMALLER", "10_dup_2_smaller")
+        send_and_expect(pkt11_2, marker11_2, False, drop_sniff, "DUP_2_SMALLER", "10_dup_2_smaller")
         print("Packet 2 dropped (as expected) ...    ", end='\r')
 
-        marker10_3 = b"T_DUP_3_" + struct.pack("!I", base + 2)
+        marker11_3 = b"T_DUP_3_" + struct.pack("!I", base + 2)
         epic.pkt_ts = epic.pkt_ts + 50; epic_pkt = epic.build_epic()
-        pkt10_3 = (
+        pkt11_3 = (
             Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
             ipv6 /
             srh_pkt /
             Raw(load=epic_pkt) /
-            Raw(load=marker10_3)
+            Raw(load=marker11_3)
         )
 
-        send_and_expect(pkt10_3, marker10_3, True, good_sniff, "DUP_3_GREATER", "10_dup_3_greater")
+        send_and_expect(pkt11_3, marker11_3, True, good_sniff, "DUP_3_GREATER", "10_dup_3_greater")
         print("Packet 3 forwarded (as expected) ...  ", end='\r')
 
-        marker10_4 = b"T_DUP_4_" + struct.pack("!I", base + 3)
+        marker11_4 = b"T_DUP_4_" + struct.pack("!I", base + 3)
         epic_pkt = epic.build_epic() # Unchanged timestamp
-        pkt10_4 = (
+        pkt11_4 = (
             Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
             ipv6 /
             srh_pkt /
             Raw(load=epic_pkt) /
-            Raw(load=marker10_4)
+            Raw(load=marker11_4)
         )
 
-        send_and_expect(pkt10_4, marker10_4, False, drop_sniff, "DUP_4_EQUAL", "10_dup_4_equal")
+        send_and_expect(pkt11_4, marker11_4, False, drop_sniff, "DUP_4_EQUAL", "10_dup_4_equal")
         print("Packet 4 dropped (as expected) ...    ", end='\r')
 
-        marker10_5 = b"T_DUP_5_" + struct.pack("!I", base + 4)
+        marker11_5 = b"T_DUP_5_" + struct.pack("!I", base + 4)
         epic.pkt_ts = epic.pkt_ts - 5; epic_pkt = epic.build_epic()
-        pkt10_5 = (
+        pkt11_5 = (
             Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
             ipv6 /
             srh_pkt /
             Raw(load=epic_pkt) /
-            Raw(load=marker10_5)
+            Raw(load=marker11_5)
         )
 
-        send_and_expect(pkt10_5, marker10_5, False, drop_sniff, "DUP_5_SMALLER_AFTER_UPDATE", "10_dup_5_smaller_after")
+        send_and_expect(pkt11_5, marker11_5, False, drop_sniff, "DUP_5_SMALLER_AFTER_UPDATE", "10_dup_5_smaller_after")
         print("Packet 5 dropped (as expected) ...    ", end='\r')
 
         print("✅ [PASS] DUP test: smaller+equal timestamps drop, greater passes (5-step)")
@@ -410,43 +448,44 @@ def run_tests():
         print("❌ [FAIL] DUP 5-step test failed")
 
 
-    #11) DIFF_PO: 2 packets, origin2 != origin1
+    #12) DIFF_PO: 2 packets, origin2 != origin1
     base = (int(time.time()) & 0xFFFFFFFF) + 200
 
-    marker11_1 = b"T_PO_1_" + struct.pack("!I", base)
+    marker12_1 = b"T_PO_1_" + struct.pack("!I", base)
     epic.pkt_ts = epic.pkt_ts + 20; epic_pkt = epic.build_epic()
     srh_pkt = srh.build_srh()
-    pkt11_1 = (
+    pkt12_1 = (
         Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
         ipv6 /
         srh_pkt /
         Raw(load=epic_pkt) /
-        Raw(load=marker11_1)
+        Raw(load=marker12_1)
     )
 
-    marker11_2 = b"T_PO_2_" + struct.pack("!I", base + 1)
+    marker12_2 = b"T_PO_2_" + struct.pack("!I", base + 1)
     epic2 = EpicBuilder(epic.key0, epic.key1,
-                        epic.src_as_host ^ 0x0101010101010101,
+                        epic.src_as_host ^ 0x1010101010101010,
                         epic.segid ^ 0x1010,
                         epic.pkt_ts, # Same teimstamps
                         epic.path_ts ^ 0x10101010,
                         epic.per_hop_count, epic.epic_next_hdr, epic.ts_expiry, epic.ingress_port, epic.egress_port)
 
     epic2_pkt = epic2.build_epic()
-    pkt11_2 = (
+    pkt12_2 = (
         Ether(src=SRC_MAC, dst=DST_MAC, type=0x86DD) /
         ipv6 /
         srh_pkt /
         Raw(load=epic2_pkt) /
-        Raw(load=marker11_2)
+        Raw(load=marker12_2)
     )
 
     try:
         # Origin #1
-        send_and_expect(pkt11_1, marker11_1, True, good_sniff, "PO_1", "11_PO_1")
+        send_and_expect(pkt12_1, marker12_1, True, good_sniff, "PO_1", "12_PO_1")
+        print("First packet (PO_1) forwarded", end='\r')
 
         # Origin #2 (different src and segid) with smaller timestamp
-        send_and_expect(pkt11_2, marker11_2, True, good_sniff, "PO_2", "11_PO_2")
+        send_and_expect(pkt12_2, marker12_2, True, good_sniff, "PO_2", "12_PO_2")
 
         print("✅ [PASS] Different packet-origin allows equal timestamp (2-step)")
         valid_tests += 1
@@ -454,6 +493,7 @@ def run_tests():
         if PRINT_ERRORS:
             print(f"Error:\n{'`'*10}\n{str(e)}\n{'`'*10}\n")
         print("❌ [FAIL] Different packet-origin test failed! Retry (hash collision chance)")
+    
 
     if total_test == valid_tests: print("---- ALL TESTS PASSED ✅ ----")
     else: print(f"{total_test - valid_tests} TESTS FAILED ❌")

@@ -168,17 +168,6 @@ class EpicBuilder:
 
         return epic
 
-
-    def pack_epic_perhop(self):
-        per_hop = struct.pack("!BBBH",
-                          self.ts_expiry & 0xFF,
-                          self.ingress_port & 0xFF,
-                          self.egress_port & 0xFF,
-                          self.segid & 0xFFFF)
-        
-        per_hop += (self.__hvf24 & 0xFFFFFF).to_bytes(3, "big")
-        return per_hop
-
 class SRHBuilder:
     sid_list = None
     nextHeader = None
